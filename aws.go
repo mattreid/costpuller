@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/costexplorer"
 	"github.com/aws/aws-sdk-go/service/organizations"
 	"github.com/jinzhu/now"
+	"google.golang.org/api/sheets/v4"
 )
 
 const AWSTagCostpullerCategory = "costpuller_category"
@@ -27,7 +28,9 @@ type AWSPuller struct {
 // NewAWSPuller returns a new AWS client.
 func NewAWSPuller(debug bool) *AWSPuller {
 	awsp := new(AWSPuller)
+	// FIXME:  The profile should be pulled from the configuration or omitted
 	awsp.session = session.Must(session.NewSessionWithOptions(session.Options{
+		Profile:           "developer-billing",
 		SharedConfigState: session.SharedConfigEnable,
 	}))
 	awsp.debug = debug
@@ -180,67 +183,67 @@ func (a *AWSPuller) NormalizeResponse(
 	dateRange string,
 	accountID string,
 	serviceResults map[string]float64,
-) ([]string, error) {
-	// format is:
-	// group, date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers,
-	// dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
-
-	// remove: 2 4 5 6 7 9
-	output := make([]string, 13)
-	for idx := range output {
-		output[idx] = "PENDING"
-	}
+) (*sheets.RowData, error) {
+	// Format is:
+	//   [0-9]    group, date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers,
+	//   [10-18]  dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, rebate
+	// Select entries 0, 1, 3, 8, and 10-18; omit entries 2, 4, 5, 6, 7, and 9
+	output := sheets.RowData{Values: make([]*sheets.CellData, 13)}
 	// set group
-	output[0] = group
-	// infra is always AWS
-	output[3] = "AWS"
+	output.Values[0] = newStringCell(group)
 	// set date - we use the first service entry
-	output[1] = dateRange
-	// set clusterID
-	output[2] = accountID
-	// init cost values
-	output[4] = "0"
-	output[5] = "0"
-	output[6] = "0"
-	output[7] = "0"
-	output[8] = "0"
-	output[9] = "0"
-	output[10] = "0"
-	output[11] = "0"
-	output[12] = "0"
-	// normalize cost values
+	output.Values[1] = newStringCell(dateRange)
+	// skip clusterId; set the accountId
+	output.Values[2] = newStringCell(accountID)
+	// skip PO, clusterType, usageType, and product; infra is always AWS
+	output.Values[3] = newStringCell("AWS")
+
+	// skip numberUsers; pick out and set the values for dataTransfer, storage,
+	// dns, and tax; sum the remaining values into categories for machines,
+	// keyMgmnt, and "other".
 	var ec2Val float64 = 0
 	var kmVal float64 = 0
 	var otherVal float64 = 0
+
+	// set default values, in case they are omitted from the data
+	output.Values[4] = newNumberCell(0.0)
+	output.Values[6] = newNumberCell(0.0)
+	output.Values[9] = newNumberCell(0.0)
+	output.Values[11] = newNumberCell(0.0)
+
 	for key, value := range serviceResults {
 		switch key {
 		case "AWS Data Transfer":
-			output[4] = fmt.Sprintf("%f", value)
+			output.Values[4] = newNumberCell(value)
 		case "Amazon Elastic Compute Cloud - Compute":
 			ec2Val += value
 		case "EC2 - Other":
 			ec2Val += value
 		case "Amazon Simple Storage Service":
-			output[6] = fmt.Sprintf("%f", value)
+			output.Values[6] = newNumberCell(value)
 		case "AWS Key Management Service":
 			kmVal += value
 		case "AWS Secrets Manager":
 			kmVal += value
 		case "Amazon Route 53":
-			output[9] = fmt.Sprintf("%f", value)
+			output.Values[9] = newNumberCell(value)
 		case "Tax":
-			output[11] = fmt.Sprintf("%f", value)
+			output.Values[11] = newNumberCell(value)
 		default:
 			otherVal += value
 		}
 	}
-	// EC2
-	output[5] = fmt.Sprintf("%f", ec2Val)
+	// EC2 ("machines")
+	output.Values[5] = newNumberCell(ec2Val)
 	// key management
-	output[7] = fmt.Sprintf("%f", kmVal)
-	// store other total
-	output[10] = fmt.Sprintf("%f", otherVal)
-	return output, nil
+	output.Values[7] = newNumberCell(kmVal)
+	// registrar (always zero??)
+	output.Values[8] = newNumberCell(0.0)
+	// "other" total
+	output.Values[10] = newNumberCell(otherVal)
+	// rebate (always zero??)
+	output.Values[12] = newNumberCell(0.0)
+	return &output, nil
 }
 
 // CheckResponseConsistency checks the response consistency with various checks. Returns the calculated total.
@@ -382,10 +385,7 @@ func (a *AWSPuller) WriteAWSTags(accounts map[string][]AccountEntry) error {
 				_, err := svo.TagResource(&organizations.TagResourceInput{
 					ResourceId: &accountEntry.AccountID,
 					Tags: []*organizations.Tag{
-						{
-							Key:   &categoryTag,
-							Value: &category,
-						},
+						{Key: &categoryTag, Value: &category},
 					},
 				})
 				if err != nil {
@@ -398,4 +398,12 @@ func (a *AWSPuller) WriteAWSTags(accounts map[string][]AccountEntry) error {
 		}
 	}
 	return nil
+}
+
+func newStringCell(val string) *sheets.CellData {
+	return &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &val}}
+}
+
+func newNumberCell(val float64) *sheets.CellData {
+	return &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{NumberValue: &val}}
 }

@@ -154,8 +154,8 @@ func (c *CMPuller) ParseResponse(response []byte) (*Response, error) {
 // NormalizeResponse normalizes a Response object data into report categories.
 func (c *CMPuller) NormalizeResponse(response *Response) ([]string, error) {
 	// format is:
-	// date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers,
-	// dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
+	//   date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers,
+	//   dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
 	// init fields with pending flag
 	output := make([]string, 18)
 	for idx := range output {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/csv"
 	"errors"
 	"flag"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/browserutils/kooky"
 	"github.com/browserutils/kooky/browser/chrome"
+	"google.golang.org/api/option"
+	"google.golang.org/api/sheets/v4"
 	"gopkg.in/yaml.v2"
 )
 
@@ -50,10 +53,9 @@ func main() {
 	csvfilePtr := flag.String("csv", fmt.Sprintf("output-%s.csv", nowStr), "output file for csv data")
 	reportFilePtr := flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report")
 	flag.Parse()
-	// create aws puller instance
+
 	awsPuller := NewAWSPuller(*debugPtr)
 	if *awsWriteTagsPtr {
-		// we pull accounts from file
 		accounts, err := getAccountSetsFromFile(*accountsFilePtr)
 		if err != nil {
 			log.Fatalf("[main] error getting accounts list: %v", err)
@@ -64,6 +66,7 @@ func main() {
 		}
 		os.Exit(0)
 	}
+
 	if *awsCheckTagsPtr {
 		log.Println("[main] checking tags on AWS")
 		_, err := getAccountSetsFromAWS(awsPuller)
@@ -72,11 +75,10 @@ func main() {
 		}
 		os.Exit(0)
 	}
-	// open output files
+
 	log.Printf("[main] using csv output file %s\n", *csvfilePtr)
 	log.Printf("[main] using report output file %s\n", *reportFilePtr)
-	// create data holder
-	csvData := make([][]string, 0)
+
 	// get account lists
 	var accounts map[string][]AccountEntry
 	if *taggedAccountsPtr {
@@ -90,37 +92,42 @@ func main() {
 	}
 	sortedAccountKeys := sortedKeys(accounts)
 
-	// open csv output file
 	outfile, err := os.Create(*csvfilePtr)
 	if err != nil {
 		log.Fatalf("[main] error creating output file: %v", err)
 	}
 	defer closeFile(outfile)
-	// open report file
+
 	reportFile, err := os.Create(*reportFilePtr)
 	if err != nil {
 		log.Fatalf("[main] error creating report file: %v", err)
 	}
 	defer closeFile(reportFile)
-	// check for run mode
+
+	var sheetData []*sheets.RowData
 	switch *modePtr {
 	case "aws":
 		log.Println("[main] note: using credentials and account from env AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for aws pull")
 		if *monthPtr == "" || *costTypePtr == "" {
 			log.Fatal("[main] aws mode requested, but no month and/or cost type given (use --month=yyyy-mm, --costtype=type)")
 		}
-		for _, accountKey := range sortedAccountKeys {
-			group := accountKey
-			accountList := accounts[accountKey]
+		for _, group := range sortedAccountKeys {
+			accountList := accounts[group]
 			for _, account := range accountList {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)
-				csvData, _, err = pullAWS(*awsPuller, reportFile, group, account, csvData, *monthPtr, *costTypePtr)
+				rowData, _, err := pullAWS(*awsPuller, reportFile, group, account, *monthPtr, *costTypePtr)
 				if err != nil {
 					log.Fatalf("[main] error pulling data: %v", err)
 				}
+				sheetData = append(sheetData, rowData)
 			}
 		}
+		err = writeCSVFromSheet(outfile, sheetData)
+		if err != nil {
+			log.Fatalf("[main] error writing to output file: %v", err)
+		}
 	case "cm":
+		var csvData [][]string
 		cookie, err := retrieveCookie(*cookiePtr, *readcookiePtr, *cookieDbPtr)
 		if err != nil {
 			log.Fatalf("[main] error retrieving cookie: %v", err)
@@ -138,7 +145,12 @@ func main() {
 				}
 			}
 		}
+		err = writeCSV(outfile, csvData)
+		if err != nil {
+			log.Fatalf("[main] error writing to output file: %v", err)
+		}
 	case "crosscheck":
+		var csvData [][]string
 		log.Println("[main] note: using credentials and account from env AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for aws pull")
 		if *monthPtr == "" || *costTypePtr == "" {
 			log.Fatal("[main] aws mode requested, but no month and/or cost type given (use --month=yyyy-mm, --costtype=type)")
@@ -155,7 +167,7 @@ func main() {
 			for _, account := range accountList {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)
 				var totalAWS float64
-				_, totalAWS, err = pullAWS(*awsPuller, reportFile, group, account, nil, *monthPtr, *costTypePtr)
+				_, totalAWS, err = pullAWS(*awsPuller, reportFile, group, account, *monthPtr, *costTypePtr)
 				if err != nil {
 					log.Fatalf("[main] error pulling data: %v", err)
 				}
@@ -181,22 +193,135 @@ func main() {
 				}
 			}
 		}
+		err = writeCSV(outfile, csvData)
+		if err != nil {
+			log.Fatalf("[main] error writing to output file: %v", err)
+		}
 	}
-	// write data to csv
-	err = writeCSV(outfile, csvData)
+
+	client := getGcpHttpClient(usr.HomeDir + "/.config/gcp/credentials.json")
+	srv, err := sheets.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
-		log.Fatalf("[main] error writing to output file: %v", err)
+		log.Fatalf("Unable to create Google Sheets client: %v", err)
 	}
-	// done
+
+	// FIXME:  These should be stored externally
+	spreadsheetId := "163HHezADfAK0BOBiRsWOdcMr6w_NzUVx7643X2eVvf8"
+	mainSheetName := "Actuals FY24"
+	templateSheetName := "Raw Data Template"
+	sheetNameTemplate := "Raw Data %s/%s" // 'Raw Data MM/YYYY'
+
+	sheetObject, err := srv.Spreadsheets.Get(spreadsheetId).Fields("properties/title", "sheets").Do()
+	if err != nil {
+		log.Fatalf("Error retrieving spreadsheet: %v", err)
+	}
+	mainSheetID, found := getSheetIDFromName(sheetObject, mainSheetName)
+	if !found {
+		log.Fatalf("Error updating spreadsheet sheet: main sheet %q not found", mainSheetName)
+	}
+	srcID, found := getSheetIDFromName(sheetObject, templateSheetName)
+	if !found {
+		log.Fatalf("Error updating spreadsheet sheet: template sheet %q not found", templateSheetName)
+	}
+	newSheetName := fmt.Sprintf(sheetNameTemplate, (*monthPtr)[5:7], (*monthPtr)[0:4])
+
+	// Locate the cells in the main sheet which refer to the new data; we
+	// assume the references are in the same column starting in the row below it.
+	cells, err := srv.Spreadsheets.Values.Get(spreadsheetId, "'"+mainSheetName+"'!A1:ZZZ9999").Do()
+	if err != nil {
+		log.Fatalf("Error fetching main sheet (%q) values: %v", mainSheetID, err)
+	}
+	var msColumn int64 = -1
+	var msRow int64 = -1
+	for r, row := range cells.Values {
+		for c, cell := range row {
+			if str, ok := cell.(string); ok {
+				if str == newSheetName {
+					msColumn = int64(c)
+					msRow = int64(r + 1)
+					break
+				}
+			}
+		}
+	}
+	if msColumn < 0 || msRow < 0 {
+		log.Fatalf("No reference to %q found in main sheet (%q)", newSheetName, mainSheetName)
+	}
+	// Indices are zero-based, starts are inclusive, ends are exclusive.
+	msRef := &sheets.GridRange{
+		EndColumnIndex:   msColumn + 1,
+		EndRowIndex:      msRow + int64(len(sheetData)) + 1,
+		SheetId:          mainSheetID,
+		StartColumnIndex: msColumn,
+		StartRowIndex:    msRow,
+	}
+
+	// Create a new sheet by duplicating the template sheet with an appropriate
+	// name and get its ID
+	buResp, err := srv.Spreadsheets.BatchUpdate(spreadsheetId, &sheets.BatchUpdateSpreadsheetRequest{
+		Requests: []*sheets.Request{
+			{
+				DuplicateSheet: &sheets.DuplicateSheetRequest{
+					NewSheetName:     newSheetName,
+					SourceSheetId:    srcID,
+					InsertSheetIndex: int64(len(sheetObject.Sheets)),
+				},
+			},
+		},
+	}).Do()
+	if err != nil {
+		log.Fatalf("Error duplicating sheet: %v", err)
+	}
+	sheetID := buResp.Replies[0].DuplicateSheet.Properties.SheetId
+
+	// Update the new sheet with the new data, and then poke the main sheet
+	// to get it to update its references to the new sheet.
+	buResp, err = srv.Spreadsheets.BatchUpdate(spreadsheetId, &sheets.BatchUpdateSpreadsheetRequest{
+		Requests: []*sheets.Request{
+			{
+				UpdateCells: &sheets.UpdateCellsRequest{
+					Fields: "userEnteredValue",
+					Start: &sheets.GridCoordinate{
+						ColumnIndex: 0,
+						RowIndex:    1,
+						SheetId:     sheetID,
+					},
+					Rows: sheetData,
+				},
+			},
+			{
+				CopyPaste: &sheets.CopyPasteRequest{
+					Destination:      msRef,
+					PasteOrientation: "NORMAL",
+					PasteType:        "PASTE_NORMAL",
+					Source:           msRef,
+				},
+			},
+		},
+	}).Do()
+	if err != nil {
+		log.Fatalf("Error updating sheet: %v", err)
+	}
+
 	log.Println("[main] operation done")
 }
 
+// getSheetIDFromName is a helper function which returns the sheet ID for the
+// sheet (tab) with the given name in the specified spreadsheet.  Returns a
+// boolean indicating if the name was not found.
+func getSheetIDFromName(sheetObject *sheets.Spreadsheet, sheetName string) (int64, bool) {
+	for _, sheet := range sheetObject.Sheets {
+		if sheet.Properties.Title == sheetName {
+			return sheet.Properties.SheetId, true
+		}
+	}
+	return -1, false
+}
+
 func sortedKeys(m map[string][]AccountEntry) []string {
-	keys := make([]string, len(m))
-	i := 0
+	var keys []string
 	for k := range m {
-		keys[i] = k
-		i++
+		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	return keys
@@ -236,17 +361,15 @@ func pullAWS(
 	reportFile *os.File,
 	group string,
 	account AccountEntry,
-	csvData [][]string,
 	month string,
 	costType string,
-) ([][]string, float64, error) {
+) (normalized *sheets.RowData, total float64, err error) {
 	log.Printf("[pullAWS] pulling AWS data for account %s", account.AccountID)
 	result, err := awsPuller.PullData(account.AccountID, month, costType)
 	if err != nil {
 		log.Fatalf("[pullAWS] error pulling data from AWS for account %s: %v", account.AccountID, err)
-		return csvData, 0, err
 	}
-	total, err := awsPuller.CheckResponseConsistency(account, result)
+	total, err = awsPuller.CheckResponseConsistency(account, result)
 	if err != nil {
 		log.Printf(
 			"[pullAWS] consistency check failed on response for account data %s: %v",
@@ -257,15 +380,11 @@ func pullAWS(
 	} else {
 		log.Printf("[pullAWS] successful consistency check for data on account %s\n", account.AccountID)
 	}
-	normalized, err := awsPuller.NormalizeResponse(group, month, account.AccountID, result)
+	normalized, err = awsPuller.NormalizeResponse(group, month, account.AccountID, result)
 	if err != nil {
 		log.Fatalf("[pullAWS] error normalizing data from AWS for account %s: %v", account.AccountID, err)
-		return csvData, 0, err
 	}
-	if csvData != nil {
-		csvData = appendCSVData(csvData, account.AccountID, normalized)
-	}
-	return csvData, total, nil
+	return
 }
 
 func pullCostManagement(
@@ -301,9 +420,8 @@ func pullCostManagement(
 		log.Fatalf("[pullCostManagement] error normalizing data from service: %v", err)
 		return csvData, 0, err
 	}
-	if csvData != nil {
-		csvData = appendCSVData(csvData, account.AccountID, normalized)
-	}
+	log.Printf("[appendcsvdata] appended data for account %s\n", account.AccountID)
+	csvData = append(csvData, normalized)
 	return csvData, total, nil
 }
 
@@ -328,16 +446,36 @@ func deserializeChromeCookie(chromeCookies []*kooky.Cookie) (map[string]string, 
 	return deserialized, nil
 }
 
-func appendCSVData(csvData [][]string, account string, data []string) [][]string {
-	log.Printf("[appendcsvdata] appended data for account %s\n", account)
-	return append(csvData, data)
-}
-
 func writeCSV(outfile *os.File, data [][]string) error {
 	writer := csv.NewWriter(outfile)
 	defer writer.Flush()
 	for _, value := range data {
 		err := writer.Write(value)
+		if err != nil {
+			log.Printf("[writecsv] error writing csv data to file: %v ", err)
+			return err
+		}
+	}
+	return nil
+}
+
+func writeCSVFromSheet(outfile *os.File, data []*sheets.RowData) error {
+	writer := csv.NewWriter(outfile)
+	defer writer.Flush()
+	for _, row := range data {
+		rowData := make([]string, len(row.Values))
+		for i, cell := range row.Values {
+			var cellData string
+			if cell.UserEnteredValue.StringValue != nil {
+				cellData = *cell.UserEnteredValue.StringValue
+			} else if cell.UserEnteredValue.NumberValue != nil {
+				cellData = fmt.Sprintf("%f", *cell.UserEnteredValue.NumberValue)
+			} else {
+				log.Fatalf("Unexpected sheet cell value:  %v", cell.UserEnteredValue)
+			}
+			rowData[i] = cellData
+		}
+		err := writer.Write(rowData)
 		if err != nil {
 			log.Printf("[writecsv] error writing csv data to file: %v ", err)
 			return err
