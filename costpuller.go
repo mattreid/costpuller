@@ -15,7 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zellyn/kooky"
+	"github.com/browserutils/kooky"
+	"github.com/browserutils/kooky/browser/chrome"
 	"gopkg.in/yaml.v2"
 )
 
@@ -214,12 +215,12 @@ func retrieveCookie(cookie string, readCookie bool, cookieDbFile string) (map[st
 		scanner := bufio.NewScanner(os.Stdin)
 		scanner.Scan()
 		fmt.Println("Thanks! Now retrieving cookies from Chrome..")
-		cookiesCRH, err := kooky.ReadChromeCookies(cookieDbFile, "cloud.redhat.com", "", time.Time{})
+		cookiesCRH, err := chrome.ReadCookies(cookieDbFile, kooky.Domain("cloud.redhat.com"))
 		if err != nil {
 			log.Fatalf("[retrieveCookie] error reading cookies from Chrome database: %v", err)
 			return nil, err
 		}
-		cookiesRH, err := kooky.ReadChromeCookies(cookieDbFile, ".redhat.com", "", time.Time{})
+		cookiesRH, err := chrome.ReadCookies(cookieDbFile, kooky.DomainHasSuffix(".redhat.com"))
 		if err != nil {
 			log.Fatalf("[retrieveCookie] error reading cookies from Chrome database: %v", err)
 			return nil, err
