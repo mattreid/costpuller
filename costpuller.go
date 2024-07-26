@@ -54,6 +54,17 @@ func main() {
 	reportFilePtr := flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report")
 	flag.Parse()
 
+	// FIXME:  These should be stored externally
+	spreadsheetId := "163HHezADfAK0BOBiRsWOdcMr6w_NzUVx7643X2eVvf8"
+	mainSheetName := "Actuals FY24"
+	templateSheetName := "Raw Data Template"
+	sheetNameTemplate := "Raw Data %s/%s" // 'Raw Data MM/YYYY'
+	oauthTokenCache := usr.HomeDir + "/.config/gcloud/token_cache.json"
+	//awsProfileName := ""
+
+	// Obtain this early, so that the user doesn't have to wait
+	client := getGoogleOAuthHttpClient(oauthTokenCache)
+
 	awsPuller := NewAWSPuller(*debugPtr)
 	if *awsWriteTagsPtr {
 		accounts, err := getAccountSetsFromFile(*accountsFilePtr)
@@ -199,17 +210,10 @@ func main() {
 		}
 	}
 
-	client := getGcpHttpClient(usr.HomeDir + "/.config/gcp/credentials.json")
 	srv, err := sheets.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
 		log.Fatalf("Unable to create Google Sheets client: %v", err)
 	}
-
-	// FIXME:  These should be stored externally
-	spreadsheetId := "163HHezADfAK0BOBiRsWOdcMr6w_NzUVx7643X2eVvf8"
-	mainSheetName := "Actuals FY24"
-	templateSheetName := "Raw Data Template"
-	sheetNameTemplate := "Raw Data %s/%s" // 'Raw Data MM/YYYY'
 
 	sheetObject, err := srv.Spreadsheets.Get(spreadsheetId).Fields("properties/title", "sheets").Do()
 	if err != nil {
