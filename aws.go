@@ -14,23 +14,22 @@ import (
 	"google.golang.org/api/sheets/v4"
 )
 
-const AWSTagCostpullerCategory = "costpuller_category"
+const AwsTagCostpullerCategory = "costpuller_category"
 
-const AWSMetadataDescription = "description"
-const AWSMetadataStatus = "status"
+const AwsMetadataDescription = "description"
+const AwsMetadataStatus = "status"
 
-// AWSPuller implements the AWS query client
-type AWSPuller struct {
+// AwsPuller implements the AWS query client
+type AwsPuller struct {
 	session *session.Session
 	debug   bool
 }
 
-// NewAWSPuller returns a new AWS client.
-func NewAWSPuller(debug bool) *AWSPuller {
-	awsp := new(AWSPuller)
-	// FIXME:  The profile should be pulled from the configuration or omitted
+// NewAwsPuller returns a new AWS client.
+func NewAwsPuller(profile string, debug bool) *AwsPuller {
+	awsp := new(AwsPuller)
 	awsp.session = session.Must(session.NewSessionWithOptions(session.Options{
-		Profile:           "developer-billing",
+		Profile:           profile,
 		SharedConfigState: session.SharedConfigEnable,
 	}))
 	awsp.debug = debug
@@ -38,7 +37,7 @@ func NewAWSPuller(debug bool) *AWSPuller {
 }
 
 // PullData retrieves a raw data set.
-func (a *AWSPuller) PullData(accountID string, month string, costType string) (map[string]float64, error) {
+func (a *AwsPuller) PullData(accountID string, month string, costType string) (map[string]float64, error) {
 	// check month format
 	focusMonth, err := time.Parse("2006-01", month)
 	if err != nil {
@@ -178,7 +177,7 @@ func (a *AWSPuller) PullData(accountID string, month string, costType string) (m
 }
 
 // NormalizeResponse normalizes a Response object data into report categories.
-func (a *AWSPuller) NormalizeResponse(
+func (a *AwsPuller) NormalizeResponse(
 	group string,
 	dateRange string,
 	accountID string,
@@ -247,7 +246,7 @@ func (a *AWSPuller) NormalizeResponse(
 }
 
 // CheckResponseConsistency checks the response consistency with various checks. Returns the calculated total.
-func (a *AWSPuller) CheckResponseConsistency(account AccountEntry, results map[string]float64) (float64, error) {
+func (a *AwsPuller) CheckResponseConsistency(account AccountEntry, results map[string]float64) (float64, error) {
 	var total float64 = 0
 	for _, value := range results {
 		// add up value
@@ -277,19 +276,19 @@ func (a *AWSPuller) CheckResponseConsistency(account AccountEntry, results map[s
 	return total, nil
 }
 
-// GetAWSAccountMetadata returns a map with accountIDs as keys and metadata key-value pairs map as value.
-func (a *AWSPuller) GetAWSAccountMetadata() (map[string]map[string]string, error) {
+// GetAwsAccountMetadata returns a map with accountIDs as keys and metadata key-value pairs map as value.
+func (a *AwsPuller) GetAwsAccountMetadata() (map[string]map[string]string, error) {
 	// get account list and basic metadata
 	accounts, err := a.getAllAWSAccountData()
 	if err != nil {
 		return nil, err
 	}
 	// augment tags
-	log.Println("[GetAWSAccountMetadata] starting tags pull for accounts")
+	log.Println("[GetAwsAccountMetadata] starting tags pull for accounts")
 	idx := 0
 	for accountID := range accounts {
 		idx++
-		log.Printf("[GetAWSAccountMetadata] pulling tags for account %s (%d of %d)", accountID, idx, len(accounts))
+		log.Printf("[GetAwsAccountMetadata] pulling tags for account %s (%d of %d)", accountID, idx, len(accounts))
 
 		tags, err := a.getTagsForAWSAccount(accountID)
 		if err != nil {
@@ -302,7 +301,7 @@ func (a *AWSPuller) GetAWSAccountMetadata() (map[string]map[string]string, error
 	return accounts, nil
 }
 
-func (a *AWSPuller) getTagsForAWSAccount(accountID string) (map[string]string, error) {
+func (a *AwsPuller) getTagsForAWSAccount(accountID string) (map[string]string, error) {
 	result := map[string]string{}
 	svo := organizations.New(a.session)
 	output, err := svo.ListTagsForResource(&organizations.ListTagsForResourceInput{
@@ -332,7 +331,7 @@ func (a *AWSPuller) getTagsForAWSAccount(accountID string) (map[string]string, e
 	return result, nil
 }
 
-func (a *AWSPuller) pullAccountData(
+func (a *AwsPuller) pullAccountData(
 	svo *organizations.Organizations,
 	result *map[string]map[string]string,
 	nextToken *string,
@@ -348,14 +347,14 @@ func (a *AWSPuller) pullAccountData(
 	}
 	for _, e := range output.Accounts {
 		(*result)[*e.Id] = map[string]string{
-			AWSMetadataDescription: *e.Name,
-			AWSMetadataStatus:      *e.Status,
+			AwsMetadataDescription: *e.Name,
+			AwsMetadataStatus:      *e.Status,
 		}
 	}
 	return output.NextToken, nil
 }
 
-func (a *AWSPuller) getAllAWSAccountData() (map[string]map[string]string, error) {
+func (a *AwsPuller) getAllAWSAccountData() (map[string]map[string]string, error) {
 	result := map[string]map[string]string{}
 	svo := organizations.New(a.session)
 	log.Println("[pullawsdata] pulling all accounts metadata")
@@ -375,9 +374,9 @@ func (a *AWSPuller) getAllAWSAccountData() (map[string]map[string]string, error)
 	return result, nil
 }
 
-func (a *AWSPuller) WriteAWSTags(accounts map[string][]AccountEntry) error {
+func (a *AwsPuller) WriteAwsTags(accounts map[string][]AccountEntry) error {
 	svo := organizations.New(a.session)
-	categoryTag := AWSTagCostpullerCategory
+	categoryTag := AwsTagCostpullerCategory
 	for category, accountEntries := range accounts {
 		for _, accountEntry := range accountEntries {
 			fmt.Printf("setting tag %s == %s for account %s...", categoryTag, category, accountEntry.AccountID)

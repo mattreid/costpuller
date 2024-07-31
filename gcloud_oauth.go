@@ -197,13 +197,13 @@ func handleRedirectResponse(w http.ResponseWriter, queryParams url.Values) {
 
 	msg := `<!doctype html><html lang="en" dir="ltr"><body><h2>`
 	if queryParams.Get("code") == "" {
-		msg += "No access code received!</h2>"
+		msg += "Failure -- no access code received!</h2>"
 		if queryParams.Get("error") != "" {
 			msg += "<h3>Error:  " + queryParams.Get("error") + "</h3>"
 		}
 		msg += "<p>(You may close this browser window.)"
 	} else {
-		msg += "Access code received.</h2><p>You may close this browser window."
+		msg += "Success!  Access code received.</h2><p>You may close this browser window."
 	}
 	msg += "</body></html>"
 	_, err := fmt.Fprint(w, msg)

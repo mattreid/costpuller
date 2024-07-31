@@ -1,15 +1,44 @@
+// Theory of Operation
+//
+// This tool gathers billing data from various accounts on various cloud
+// providers.  Ultimately, it will support AWS, Azure, Google Cloud Platform,
+// and IBM Cloud; currently, it supports only AWS.  The data gathered is either
+// saved to a local file as CSV or it is loaded into a Google Sheet.
+//
+// The configuration for this tool is provided by a YAML file.  The file
+// provides the list of cloud providers and the account IDs for each one,
+// grouped by organization.  It also provides a section for configuring and
+// customizing the operation of this tool.
+//
+// Providing Credentials
+//  - AWS access is controlled in the conventional ways:  either via
+//    environment variables AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY or via
+//    ~/.aws/ config files created by the `awscli configure` command.  If using
+//    the file-based credentials, you may select a specific profile.
+//  - Google Sheets access is provided via OAuth 2.0.  This tool acts as an
+//    OAuth client.  The client configuration is provided in the conventional
+//    location (${HOME}/.config/gcloud/application_default_credentials.json)
+//    and can be downloaded from https://console.developers.google.com, under
+//    "Credentials").  The access token and refresh token are cached in a local
+//    file.  If the token file doesn't exist, this tool prompts the user to
+//    open a page in their browser (this should be done on the same machine
+//    which is running this tool).  The browser will allow the user to interact
+//    with Google's authentication servers, and then it will be redirected to a
+//    listener provided by this tool, which allows the tool to obtain the
+//    OAuth access code.  The tool then exchanges that for the tokens, which it
+//    writes to the cache file.
+//
+
 package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/csv"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"math"
-	"net/http"
 	"os"
 	"os/user"
 	"sort"
@@ -18,10 +47,25 @@ import (
 
 	"github.com/browserutils/kooky"
 	"github.com/browserutils/kooky/browser/chrome"
-	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
 	"gopkg.in/yaml.v2"
 )
+
+type CommandLineOptions struct {
+	modePtr           *string
+	debugPtr          *bool
+	awsWriteTagsPtr   *bool
+	awsCheckTagsPtr   *bool
+	accountsFilePtr   *string
+	taggedAccountsPtr *bool
+	monthPtr          *string
+	costTypePtr       *string
+	cookiePtr         *string
+	readcookiePtr     *bool
+	cookieDbPtr       *string
+	csvfilePtr        *string
+	reportFilePtr     *string
+}
 
 // AccountEntry describes an account with metadata.
 type AccountEntry struct {
@@ -38,113 +82,64 @@ func main() {
 	// bootstrap
 	usr, _ := user.Current()
 	nowStr := time.Now().Format("20060102150405")
-	// configure flags
-	modePtr := flag.String("mode", "aws", "run mode, needs to be one of aws, cm or crosscheck")
-	debugPtr := flag.Bool("debug", false, "outputs debug info")
-	awsWriteTagsPtr := flag.Bool("awswritetags", false, "write tags to AWS accounts (USE WITH CARE!)")
-	awsCheckTagsPtr := flag.Bool("checktags", false, "checks all AWS accounts available for correct tag setting.")
-	accountsFilePtr := flag.String("accounts", "accounts.yaml", "file to read accounts list from")
-	taggedAccountsPtr := flag.Bool("taggedaccounts", false, "use the AWS tags as account list source")
-	monthPtr := flag.String("month", "", "context month in format yyyy-mm, only for aws or crosscheck modes")
-	costTypePtr := flag.String("costtype", "UnblendedCost", "cost type to pull, only for aws or crosscheck modes, one of AmortizedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, NormalizedUsageAmount, UnblendedCost, and UsageQuantity")
-	cookiePtr := flag.String("cookie", "", "access cookie for cost management system in curl serialized format, only for cm or crosscheck modes")
-	readcookiePtr := flag.Bool("readcookie", true, "reads the cookie from the Chrome cookies database, only for cm or crosscheck modes")
-	cookieDbPtr := flag.String("cookiedb", fmt.Sprintf("%s/.config/google-chrome/Default/Cookies", usr.HomeDir), "path to Chrome cookies database file, only for cm or crosscheck modes")
-	csvfilePtr := flag.String("csv", fmt.Sprintf("output-%s.csv", nowStr), "output file for csv data")
-	reportFilePtr := flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report")
+
+	options := CommandLineOptions{
+		accountsFilePtr:   flag.String("accounts", "accounts.yaml", "file to read accounts list from"),
+		awsCheckTagsPtr:   flag.Bool("checktags", false, "checks all AWS accounts available for correct tag setting."),
+		awsWriteTagsPtr:   flag.Bool("awswritetags", false, "write tags to AWS accounts (USE WITH CARE!)"),
+		cookieDbPtr:       flag.String("cookiedb", fmt.Sprintf("%s/.config/google-chrome/Default/Cookies", usr.HomeDir), "path to Chrome cookies database file, only for cm or crosscheck modes"),
+		cookiePtr:         flag.String("cookie", "", "access cookie for cost management system in curl serialized format, only for cm or crosscheck modes"),
+		costTypePtr:       flag.String("costtype", "UnblendedCost", "cost type to pull, only for aws or crosscheck modes, one of AmortizedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, NormalizedUsageAmount, UnblendedCost, and UsageQuantity"),
+		csvfilePtr:        flag.String("csv", fmt.Sprintf("output-%s.csv", nowStr), "output file for csv data"),
+		debugPtr:          flag.Bool("debug", false, "outputs debug info"),
+		modePtr:           flag.String("mode", "aws", "run mode, needs to be one of aws, cm or crosscheck"),
+		monthPtr:          flag.String("month", "", "context month in format yyyy-mm, only for aws or crosscheck modes"),
+		readcookiePtr:     flag.Bool("readcookie", true, "reads the cookie from the Chrome cookies database, only for cm or crosscheck modes"),
+		reportFilePtr:     flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report"),
+		taggedAccountsPtr: flag.Bool("taggedaccounts", false, "use the AWS tags as account list source"),
+	}
 	flag.Parse()
 
-	// FIXME:  These should be stored externally
-	spreadsheetId := "163HHezADfAK0BOBiRsWOdcMr6w_NzUVx7643X2eVvf8"
-	mainSheetName := "Actuals FY24"
-	templateSheetName := "Raw Data Template"
-	sheetNameTemplate := "Raw Data %s/%s" // 'Raw Data MM/YYYY'
+	// FIXME:  These should be provided externally
 	oauthTokenCache := usr.HomeDir + "/.config/gcloud/token_cache.json"
-	//awsProfileName := ""
+	awsProfileName := "developer-billing"
 
-	// Obtain this early, so that the user doesn't have to wait
-	client := getGoogleOAuthHttpClient(oauthTokenCache)
-
-	awsPuller := NewAWSPuller(*debugPtr)
-	if *awsWriteTagsPtr {
-		accounts, err := getAccountSetsFromFile(*accountsFilePtr)
-		if err != nil {
-			log.Fatalf("[main] error getting accounts list: %v", err)
-		}
-		err = awsPuller.WriteAWSTags(accounts)
-		if err != nil {
-			log.Fatalf("[main] error writing account tag: %v", err)
-		}
+	awsPuller := NewAwsPuller(awsProfileName, *options.debugPtr)
+	if *options.awsWriteTagsPtr {
+		writeAwsTags(awsPuller, options)
 		os.Exit(0)
 	}
 
-	if *awsCheckTagsPtr {
-		log.Println("[main] checking tags on AWS")
-		_, err := getAccountSetsFromAWS(awsPuller)
-		if err != nil {
-			log.Fatalf("[main] error getting accounts list: %v", err)
-		}
+	if *options.awsCheckTagsPtr {
+		checkAwsTags(awsPuller)
 		os.Exit(0)
 	}
 
-	log.Printf("[main] using csv output file %s\n", *csvfilePtr)
-	log.Printf("[main] using report output file %s\n", *reportFilePtr)
-
-	// get account lists
-	var accounts map[string][]AccountEntry
-	if *taggedAccountsPtr {
-		accounts, err = getAccountSetsFromAWS(awsPuller)
-	} else {
-		// we pull accounts from file
-		accounts, err = getAccountSetsFromFile(*accountsFilePtr)
-	}
-	if err != nil {
-		log.Fatalf("[main] error getting accounts list: %v", err)
-	}
-	sortedAccountKeys := sortedKeys(accounts)
-
-	outfile, err := os.Create(*csvfilePtr)
-	if err != nil {
-		log.Fatalf("[main] error creating output file: %v", err)
-	}
+	outfile := getCsvFile(options)
 	defer closeFile(outfile)
 
-	reportFile, err := os.Create(*reportFilePtr)
-	if err != nil {
-		log.Fatalf("[main] error creating report file: %v", err)
-	}
+	reportFile := getReportFile(options)
 	defer closeFile(reportFile)
 
-	var sheetData []*sheets.RowData
-	switch *modePtr {
+	accounts, sortedAccountKeys := awsPuller.getAwsAccounts(options)
+
+	switch *options.modePtr {
 	case "aws":
-		log.Println("[main] note: using credentials and account from env AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for aws pull")
-		if *monthPtr == "" || *costTypePtr == "" {
-			log.Fatal("[main] aws mode requested, but no month and/or cost type given (use --month=yyyy-mm, --costtype=type)")
-		}
-		for _, group := range sortedAccountKeys {
-			accountList := accounts[group]
-			for _, account := range accountList {
-				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)
-				rowData, _, err := pullAWS(*awsPuller, reportFile, group, account, *monthPtr, *costTypePtr)
-				if err != nil {
-					log.Fatalf("[main] error pulling data: %v", err)
-				}
-				sheetData = append(sheetData, rowData)
-			}
-		}
-		err = writeCSVFromSheet(outfile, sheetData)
+		client := getGoogleOAuthHttpClient(oauthTokenCache)
+		sheetData := awsPuller.pullAwsByAccount(accounts, sortedAccountKeys, options, reportFile)
+		// FIXME:  Use a command line option to select one of CSV or GSheet.
+		err = writeCsvFromSheet(outfile, sheetData)
 		if err != nil {
 			log.Fatalf("[main] error writing to output file: %v", err)
 		}
+		postToGSheet(sheetData, *options.monthPtr, client)
 	case "cm":
 		var csvData [][]string
-		cookie, err := retrieveCookie(*cookiePtr, *readcookiePtr, *cookieDbPtr)
+		cookie, err := retrieveCookie(*options.cookiePtr, *options.readcookiePtr, *options.cookieDbPtr)
 		if err != nil {
 			log.Fatalf("[main] error retrieving cookie: %v", err)
 		}
-		httpClient := &http.Client{}
-		cmPuller := NewCMPuller(*debugPtr, httpClient, cookie)
+		cmPuller := NewCmPuller(cookie, *options.debugPtr)
 		for _, accountKey := range sortedAccountKeys {
 			group := accountKey
 			accountList := accounts[accountKey]
@@ -156,29 +151,33 @@ func main() {
 				}
 			}
 		}
-		err = writeCSV(outfile, csvData)
+		err = writeCsv(outfile, csvData)
 		if err != nil {
 			log.Fatalf("[main] error writing to output file: %v", err)
 		}
 	case "crosscheck":
 		var csvData [][]string
-		log.Println("[main] note: using credentials and account from env AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for aws pull")
-		if *monthPtr == "" || *costTypePtr == "" {
+		if *options.monthPtr == "" || *options.costTypePtr == "" {
 			log.Fatal("[main] aws mode requested, but no month and/or cost type given (use --month=yyyy-mm, --costtype=type)")
 		}
-		cookie, err := retrieveCookie(*cookiePtr, *readcookiePtr, *cookieDbPtr)
+		cookie, err := retrieveCookie(*options.cookiePtr, *options.readcookiePtr, *options.cookieDbPtr)
 		if err != nil {
 			log.Fatalf("[main] error retrieving cookie: %v", err)
 		}
-		httpClient := &http.Client{}
-		cmPuller := NewCMPuller(*debugPtr, httpClient, cookie)
+		cmPuller := NewCmPuller(cookie, *options.debugPtr)
 		for _, accountKey := range sortedAccountKeys {
 			group := accountKey
 			accountList := accounts[accountKey]
 			for _, account := range accountList {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)
-				var totalAWS float64
-				_, totalAWS, err = pullAWS(*awsPuller, reportFile, group, account, *monthPtr, *costTypePtr)
+				var totalAws float64
+				_, totalAws, err = awsPuller.pullAwsAccount(
+					account,
+					group,
+					*options.monthPtr,
+					*options.costTypePtr,
+					reportFile,
+				)
 				if err != nil {
 					log.Fatalf("[main] error pulling data: %v", err)
 				}
@@ -188,138 +187,112 @@ func main() {
 					log.Fatalf("[main] error pulling data: %v", err)
 				}
 				// check if totals from AWS and CM are consistent
-				if math.Round(totalAWS*100)/100 != math.Round(totalCM*100)/100 {
+				if math.Round(totalAws*100)/100 != math.Round(totalCM*100)/100 {
 					log.Printf(
 						"[main] error checking consistency of totals from AWS and CM for account %s: aws = %f; cm = %f",
 						account.AccountID,
-						totalAWS,
+						totalAws,
 						totalCM,
 					)
 					writeReport(reportFile, fmt.Sprintf(
 						"%s: error checking consistency of totals from AWS and CM: aws = %f; cm = %f",
 						account.AccountID,
-						totalAWS,
+						totalAws,
 						totalCM,
 					))
 				}
 			}
 		}
-		err = writeCSV(outfile, csvData)
+		err = writeCsv(outfile, csvData)
 		if err != nil {
 			log.Fatalf("[main] error writing to output file: %v", err)
 		}
 	}
 
-	srv, err := sheets.NewService(context.Background(), option.WithHTTPClient(client))
-	if err != nil {
-		log.Fatalf("Unable to create Google Sheets client: %v", err)
-	}
-
-	sheetObject, err := srv.Spreadsheets.Get(spreadsheetId).Fields("properties/title", "sheets").Do()
-	if err != nil {
-		log.Fatalf("Error retrieving spreadsheet: %v", err)
-	}
-	mainSheetID, found := getSheetIDFromName(sheetObject, mainSheetName)
-	if !found {
-		log.Fatalf("Error updating spreadsheet sheet: main sheet %q not found", mainSheetName)
-	}
-	srcID, found := getSheetIDFromName(sheetObject, templateSheetName)
-	if !found {
-		log.Fatalf("Error updating spreadsheet sheet: template sheet %q not found", templateSheetName)
-	}
-	newSheetName := fmt.Sprintf(sheetNameTemplate, (*monthPtr)[5:7], (*monthPtr)[0:4])
-
-	// Locate the cells in the main sheet which refer to the new data; we
-	// assume the references are in the same column starting in the row below it.
-	cells, err := srv.Spreadsheets.Values.Get(spreadsheetId, "'"+mainSheetName+"'!A1:ZZZ9999").Do()
-	if err != nil {
-		log.Fatalf("Error fetching main sheet (%q) values: %v", mainSheetID, err)
-	}
-	var msColumn int64 = -1
-	var msRow int64 = -1
-	for r, row := range cells.Values {
-		for c, cell := range row {
-			if str, ok := cell.(string); ok {
-				if str == newSheetName {
-					msColumn = int64(c)
-					msRow = int64(r + 1)
-					break
-				}
-			}
-		}
-	}
-	if msColumn < 0 || msRow < 0 {
-		log.Fatalf("No reference to %q found in main sheet (%q)", newSheetName, mainSheetName)
-	}
-	// Indices are zero-based, starts are inclusive, ends are exclusive.
-	msRef := &sheets.GridRange{
-		EndColumnIndex:   msColumn + 1,
-		EndRowIndex:      msRow + int64(len(sheetData)) + 1,
-		SheetId:          mainSheetID,
-		StartColumnIndex: msColumn,
-		StartRowIndex:    msRow,
-	}
-
-	// Create a new sheet by duplicating the template sheet with an appropriate
-	// name and get its ID
-	buResp, err := srv.Spreadsheets.BatchUpdate(spreadsheetId, &sheets.BatchUpdateSpreadsheetRequest{
-		Requests: []*sheets.Request{
-			{
-				DuplicateSheet: &sheets.DuplicateSheetRequest{
-					NewSheetName:     newSheetName,
-					SourceSheetId:    srcID,
-					InsertSheetIndex: int64(len(sheetObject.Sheets)),
-				},
-			},
-		},
-	}).Do()
-	if err != nil {
-		log.Fatalf("Error duplicating sheet: %v", err)
-	}
-	sheetID := buResp.Replies[0].DuplicateSheet.Properties.SheetId
-
-	// Update the new sheet with the new data, and then poke the main sheet
-	// to get it to update its references to the new sheet.
-	buResp, err = srv.Spreadsheets.BatchUpdate(spreadsheetId, &sheets.BatchUpdateSpreadsheetRequest{
-		Requests: []*sheets.Request{
-			{
-				UpdateCells: &sheets.UpdateCellsRequest{
-					Fields: "userEnteredValue",
-					Start: &sheets.GridCoordinate{
-						ColumnIndex: 0,
-						RowIndex:    1,
-						SheetId:     sheetID,
-					},
-					Rows: sheetData,
-				},
-			},
-			{
-				CopyPaste: &sheets.CopyPasteRequest{
-					Destination:      msRef,
-					PasteOrientation: "NORMAL",
-					PasteType:        "PASTE_NORMAL",
-					Source:           msRef,
-				},
-			},
-		},
-	}).Do()
-	if err != nil {
-		log.Fatalf("Error updating sheet: %v", err)
-	}
-
 	log.Println("[main] operation done")
 }
 
-// getSheetIDFromName is a helper function which returns the sheet ID for the
-// sheet (tab) with the given name in the specified spreadsheet.  Returns a
-// boolean indicating if the name was not found.
-func getSheetIDFromName(sheetObject *sheets.Spreadsheet, sheetName string) (int64, bool) {
-	for _, sheet := range sheetObject.Sheets {
-		if sheet.Properties.Title == sheetName {
-			return sheet.Properties.SheetId, true
+func (a *AwsPuller) getAwsAccounts(options CommandLineOptions) (
+	accounts map[string][]AccountEntry,
+	sortedAccountKeys []string,
+) {
+	var err error
+	if *options.taggedAccountsPtr {
+		accounts, err = getAccountSetsFromAws(a)
+	} else {
+		accounts, err = getAccountSetsFromFile(*options.accountsFilePtr)
+	}
+	if err != nil {
+		log.Fatalf("[getAwsAccounts] error getting accounts list: %v", err)
+	}
+	sortedAccountKeys = sortedKeys(accounts)
+	return
+}
+
+func (a *AwsPuller) pullAwsByAccount(
+	accounts map[string][]AccountEntry,
+	sortedAccountKeys []string,
+	options CommandLineOptions,
+	reportFile *os.File,
+) (sheetData []*sheets.RowData) {
+	if *options.monthPtr == "" || *options.costTypePtr == "" {
+		log.Fatal("[pullAwsByAccount] aws mode requested, but no month and/or cost type given (use --month=yyyy-mm, --costtype=type)")
+	}
+	for _, group := range sortedAccountKeys {
+		accountList := accounts[group]
+		for _, account := range accountList {
+			log.Printf("[pullAwsByAccount] pulling data for account %s (group %s)\n", account.AccountID, group)
+			rowData, _, err := a.pullAwsAccount(
+				account,
+				group,
+				*options.monthPtr,
+				*options.costTypePtr,
+				reportFile,
+			)
+			if err != nil {
+				log.Fatalf("[pullAwsByAccount] error pulling data: %v", err)
+			}
+			sheetData = append(sheetData, rowData)
 		}
 	}
-	return -1, false
+	return
+}
+
+func writeAwsTags(awsPuller *AwsPuller, options CommandLineOptions) {
+	accounts, err := getAccountSetsFromFile(*options.accountsFilePtr)
+	if err != nil {
+		log.Fatalf("[writeAwsTags] error getting accounts list: %v", err)
+	}
+	err = awsPuller.WriteAwsTags(accounts)
+	if err != nil {
+		log.Fatalf("[writeAwsTags] error writing account tag: %v", err)
+	}
+}
+
+func checkAwsTags(awsPuller *AwsPuller) {
+	log.Println("[checkAwsTags] checking tags on AWS")
+	_, err := getAccountSetsFromAws(awsPuller)
+	if err != nil {
+		log.Fatalf("[checkAwsTags] error getting accounts list: %v", err)
+	}
+}
+
+func getCsvFile(options CommandLineOptions) *os.File {
+	outfile, err := os.Create(*options.csvfilePtr)
+	if err != nil {
+		log.Fatalf("[getCsvFile] error creating output file: %v", err)
+	}
+	log.Printf("[getCsvFile] using csv output file %s\n", *options.csvfilePtr)
+	return outfile
+}
+
+func getReportFile(options CommandLineOptions) *os.File {
+	reportFile, err := os.Create(*options.reportFilePtr)
+	if err != nil {
+		log.Fatalf("[getReportFile] error creating report file: %v", err)
+	}
+	log.Printf("[getReportFile] using report output file %s\n", *options.reportFilePtr)
+	return reportFile
 }
 
 func sortedKeys(m map[string][]AccountEntry) []string {
@@ -344,55 +317,53 @@ func retrieveCookie(cookie string, readCookie bool, cookieDbFile string) (map[st
 		scanner := bufio.NewScanner(os.Stdin)
 		scanner.Scan()
 		fmt.Println("Thanks! Now retrieving cookies from Chrome..")
-		cookiesCRH, err := chrome.ReadCookies(cookieDbFile, kooky.Domain("cloud.redhat.com"))
+		crhCookies, err := chrome.ReadCookies(cookieDbFile, kooky.Domain("cloud.redhat.com"))
 		if err != nil {
 			log.Fatalf("[retrieveCookie] error reading cookies from Chrome database: %v", err)
 			return nil, err
 		}
-		cookiesRH, err := chrome.ReadCookies(cookieDbFile, kooky.DomainHasSuffix(".redhat.com"))
+		rhCookies, err := chrome.ReadCookies(cookieDbFile, kooky.DomainHasSuffix(".redhat.com"))
 		if err != nil {
 			log.Fatalf("[retrieveCookie] error reading cookies from Chrome database: %v", err)
 			return nil, err
 		}
-		cookiesCRH = append(cookiesCRH, cookiesRH...)
-		return deserializeChromeCookie(cookiesCRH)
+		return deserializeChromeCookie(append(crhCookies, rhCookies...))
 	}
 	return nil, errors.New("[retrieveCookie] either --readcookie or --cookie=<cookie> needs to be given")
 }
 
-func pullAWS(
-	awsPuller AWSPuller,
-	reportFile *os.File,
-	group string,
+func (a *AwsPuller) pullAwsAccount(
 	account AccountEntry,
+	group string,
 	month string,
 	costType string,
+	reportFile *os.File,
 ) (normalized *sheets.RowData, total float64, err error) {
-	log.Printf("[pullAWS] pulling AWS data for account %s", account.AccountID)
-	result, err := awsPuller.PullData(account.AccountID, month, costType)
+	log.Printf("[pullAwsAccount] pulling AWS data for account %s", account.AccountID)
+	result, err := a.PullData(account.AccountID, month, costType)
 	if err != nil {
-		log.Fatalf("[pullAWS] error pulling data from AWS for account %s: %v", account.AccountID, err)
+		log.Fatalf("[pullAwsAccount] error pulling data from AWS for account %s: %v", account.AccountID, err)
 	}
-	total, err = awsPuller.CheckResponseConsistency(account, result)
+	total, err = a.CheckResponseConsistency(account, result)
 	if err != nil {
 		log.Printf(
-			"[pullAWS] consistency check failed on response for account data %s: %v",
+			"[pullAwsAccount] consistency check failed on response for account data %s: %v",
 			account.AccountID,
 			err,
 		)
 		writeReport(reportFile, account.AccountID+": "+err.Error())
 	} else {
-		log.Printf("[pullAWS] successful consistency check for data on account %s\n", account.AccountID)
+		log.Printf("[pullAwsAccount] successful consistency check for data on account %s\n", account.AccountID)
 	}
-	normalized, err = awsPuller.NormalizeResponse(group, month, account.AccountID, result)
+	normalized, err = a.NormalizeResponse(group, month, account.AccountID, result)
 	if err != nil {
-		log.Fatalf("[pullAWS] error normalizing data from AWS for account %s: %v", account.AccountID, err)
+		log.Fatalf("[pullAwsAccount] error normalizing data from AWS for account %s: %v", account.AccountID, err)
 	}
 	return
 }
 
 func pullCostManagement(
-	cmPuller CMPuller,
+	cmPuller CmPuller,
 	reportFile *os.File,
 	account AccountEntry,
 	csvData [][]string,
@@ -424,7 +395,7 @@ func pullCostManagement(
 		log.Fatalf("[pullCostManagement] error normalizing data from service: %v", err)
 		return csvData, 0, err
 	}
-	log.Printf("[appendcsvdata] appended data for account %s\n", account.AccountID)
+	log.Printf("[pullCostManagement] appended data for account %s\n", account.AccountID)
 	csvData = append(csvData, normalized)
 	return csvData, total, nil
 }
@@ -450,20 +421,20 @@ func deserializeChromeCookie(chromeCookies []*kooky.Cookie) (map[string]string, 
 	return deserialized, nil
 }
 
-func writeCSV(outfile *os.File, data [][]string) error {
+func writeCsv(outfile *os.File, data [][]string) error {
 	writer := csv.NewWriter(outfile)
 	defer writer.Flush()
 	for _, value := range data {
 		err := writer.Write(value)
 		if err != nil {
-			log.Printf("[writecsv] error writing csv data to file: %v ", err)
+			log.Printf("[writeCsv] error writing csv data to file: %v ", err)
 			return err
 		}
 	}
 	return nil
 }
 
-func writeCSVFromSheet(outfile *os.File, data []*sheets.RowData) error {
+func writeCsvFromSheet(outfile *os.File, data []*sheets.RowData) error {
 	writer := csv.NewWriter(outfile)
 	defer writer.Flush()
 	for _, row := range data {
@@ -481,7 +452,7 @@ func writeCSVFromSheet(outfile *os.File, data []*sheets.RowData) error {
 		}
 		err := writer.Write(rowData)
 		if err != nil {
-			log.Printf("[writecsv] error writing csv data to file: %v ", err)
+			log.Printf("[writeCsvFromSheet] error writing csv data to file: %v ", err)
 			return err
 		}
 	}
@@ -491,7 +462,7 @@ func writeCSVFromSheet(outfile *os.File, data []*sheets.RowData) error {
 func writeReport(outfile *os.File, data string) {
 	_, err := outfile.WriteString(data + "\n")
 	if err != nil {
-		log.Printf("[writereport] error writing report data to file: %v ", err)
+		log.Printf("[writeReport] error writing report data to file: %v ", err)
 	}
 }
 
@@ -499,12 +470,12 @@ func getAccountSetsFromFile(accountsFile string) (map[string][]AccountEntry, err
 	accounts := make(map[string][]AccountEntry)
 	yamlFile, err := os.ReadFile(accountsFile)
 	if err != nil {
-		log.Printf("[getaccountsets] error reading accounts file: %v ", err)
+		log.Printf("[getAccountSetsFromFile] error reading accounts file: %v ", err)
 		return nil, err
 	}
 	err = yaml.Unmarshal(yamlFile, accounts)
 	if err != nil {
-		log.Fatalf("[getaccountsets] error unmarshalling accounts file: %v", err)
+		log.Fatalf("[getAccountSetsFromFile] error unmarshalling accounts file: %v", err)
 		return nil, err
 	}
 	// set category manually on all entries
@@ -516,19 +487,19 @@ func getAccountSetsFromFile(accountsFile string) (map[string][]AccountEntry, err
 	return accounts, nil
 }
 
-func getAccountSetsFromAWS(awsPuller *AWSPuller) (map[string][]AccountEntry, error) {
-	log.Println("[main] initiating account metadata pull")
-	metadata, err := awsPuller.GetAWSAccountMetadata()
+func getAccountSetsFromAws(awsPuller *AwsPuller) (map[string][]AccountEntry, error) {
+	log.Println("[getAccountSetsFromAws] initiating account metadata pull")
+	metadata, err := awsPuller.GetAwsAccountMetadata()
 	if err != nil {
-		log.Fatalf("[main] error getting accounts list from metadata: %v", err)
+		log.Fatalf("[getAccountSetsFromAws] error getting accounts list from metadata: %v", err)
 	}
-	log.Println("[main] processing account metadata pull")
+	log.Println("[getAccountSetsFromAws] processing account metadata pull")
 	accounts := make(map[string][]AccountEntry)
 	for accountID, accountMetadata := range metadata {
-		if category, ok := accountMetadata[AWSTagCostpullerCategory]; ok {
-			description := accountMetadata[AWSMetadataDescription]
+		if category, ok := accountMetadata[AwsTagCostpullerCategory]; ok {
+			description := accountMetadata[AwsMetadataDescription]
 			log.Printf("tagged category (\"%s\") found for account %s (\"%s\")", category, accountID, description)
-			status := accountMetadata[AWSMetadataStatus]
+			status := accountMetadata[AwsMetadataStatus]
 			if status == "ACTIVE" {
 				if _, ok := accounts[category]; !ok {
 					accounts[category] = []AccountEntry{}
@@ -544,9 +515,9 @@ func getAccountSetsFromAWS(awsPuller *AWSPuller) (map[string][]AccountEntry, err
 		} else {
 			// account without category tag
 			log.Printf(
-				"ERRROR: account %s does not have an aws tag set for category (\"%s\")",
+				"ERROR: account %s does not have an aws tag set for category (\"%s\")",
 				accountID,
-				accountMetadata[AWSMetadataDescription],
+				accountMetadata[AwsMetadataDescription],
 			)
 		}
 	}

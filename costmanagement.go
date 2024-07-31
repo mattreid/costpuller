@@ -63,24 +63,24 @@ type ValueSection struct {
 	Cost    CostSection `json:"cost"`
 }
 
-// CMPuller implements the Cost Management query client.
-type CMPuller struct {
+// CmPuller implements the Cost Management query client.
+type CmPuller struct {
 	debug      bool
 	httpClient *http.Client
 	cookieMap  map[string]string
 }
 
-// NewCMPuller returns a new Cost Management client.
-func NewCMPuller(debug bool, client *http.Client, cookieMap map[string]string) *CMPuller {
-	cmp := new(CMPuller)
+// NewCmPuller returns a new Cost Management client.
+func NewCmPuller(cookieMap map[string]string, debug bool) *CmPuller {
+	cmp := new(CmPuller)
 	cmp.debug = debug
-	cmp.httpClient = client
+	cmp.httpClient = &http.Client{}
 	cmp.cookieMap = cookieMap
 	return cmp
 }
 
 // PullData retrieves a raw data set.
-func (c *CMPuller) PullData(accountID string) ([]byte, error) {
+func (c *CmPuller) PullData(accountID string) ([]byte, error) {
 	// create request
 	req, err := http.NewRequest(
 		"GET",
@@ -141,7 +141,7 @@ func (c *CMPuller) PullData(accountID string) ([]byte, error) {
 }
 
 // ParseResponse parses a raw response into a Response object.
-func (c *CMPuller) ParseResponse(response []byte) (*Response, error) {
+func (c *CmPuller) ParseResponse(response []byte) (*Response, error) {
 	responseData := new(Response)
 	err := json.Unmarshal(response, responseData)
 	if err != nil {
@@ -152,7 +152,7 @@ func (c *CMPuller) ParseResponse(response []byte) (*Response, error) {
 }
 
 // NormalizeResponse normalizes a Response object data into report categories.
-func (c *CMPuller) NormalizeResponse(response *Response) ([]string, error) {
+func (c *CmPuller) NormalizeResponse(response *Response) ([]string, error) {
 	// format is:
 	//   date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers,
 	//   dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, refund
@@ -202,7 +202,7 @@ func (c *CMPuller) NormalizeResponse(response *Response) ([]string, error) {
 }
 
 // CheckResponseConsistency checks the response consistency with various checks. Returns the calculated total.
-func (c *CMPuller) CheckResponseConsistency(account AccountEntry, response *Response) (float64, error) {
+func (c *CmPuller) CheckResponseConsistency(account AccountEntry, response *Response) (float64, error) {
 	// TODO check base value consistence by comparing to a rough value given in the config
 	// check that there is exactly one entry in toplevel data
 	if len(response.Data) != 1 {
