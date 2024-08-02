@@ -39,8 +39,10 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"os"
-	"os/user"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -65,6 +67,12 @@ type CommandLineOptions struct {
 	cookieDbPtr       *string
 	csvfilePtr        *string
 	reportFilePtr     *string
+	outputTypePtr     *string
+}
+
+type AccountsFile struct {
+	Configuration map[string]map[string]string         `yaml:"configuration"`
+	Providers     map[string]map[string][]AccountEntry `yaml:"cloud_providers"`
 }
 
 // AccountEntry describes an account with metadata.
@@ -77,34 +85,54 @@ type AccountEntry struct {
 }
 
 func main() {
-	var err error
 	log.Println("[main] costpuller starting..")
-	// bootstrap
-	usr, _ := user.Current()
-	nowStr := time.Now().Format("20060102150405")
-
+	nowTime := time.Now()
+	lastMonth := time.Date(nowTime.Year(), nowTime.Month()-1, 1, 0, 0, 0, 0, nowTime.Location())
+	nowStr := nowTime.Format("20060102150405")
+	defaultMonth := lastMonth.Format("2006-01")
+	defaultCsvFile := fmt.Sprintf("output-%s.csv", defaultMonth)
+	defaultReportFile := fmt.Sprintf("report-%s.txt", nowStr)
 	options := CommandLineOptions{
 		accountsFilePtr:   flag.String("accounts", "accounts.yaml", "file to read accounts list from"),
 		awsCheckTagsPtr:   flag.Bool("checktags", false, "checks all AWS accounts available for correct tag setting."),
 		awsWriteTagsPtr:   flag.Bool("awswritetags", false, "write tags to AWS accounts (USE WITH CARE!)"),
-		cookieDbPtr:       flag.String("cookiedb", fmt.Sprintf("%s/.config/google-chrome/Default/Cookies", usr.HomeDir), "path to Chrome cookies database file, only for cm or crosscheck modes"),
-		cookiePtr:         flag.String("cookie", "", "access cookie for cost management system in curl serialized format, only for cm or crosscheck modes"),
-		costTypePtr:       flag.String("costtype", "UnblendedCost", "cost type to pull, only for aws or crosscheck modes, one of AmortizedCost, BlendedCost, NetAmortizedCost, NetUnblendedCost, NormalizedUsageAmount, UnblendedCost, and UsageQuantity"),
-		csvfilePtr:        flag.String("csv", fmt.Sprintf("output-%s.csv", nowStr), "output file for csv data"),
+		cookieDbPtr:       flag.String("cookiedb", getDefaultCookieStore(), `path to Chrome cookies database file, only for "cm" or "crosscheck" modes`),
+		cookiePtr:         flag.String("cookie", "", `access cookie for cost management system in curl serialized format, only for "cm" or "crosscheck" modes`),
+		costTypePtr:       flag.String("costtype", "UnblendedCost", `cost type to pull, only for "aws" or "crosscheck" modes, one of "AmortizedCost", "BlendedCost", "NetAmortizedCost", "NetUnblendedCost", "NormalizedUsageAmount", "UnblendedCost", or "UsageQuantity"`),
+		csvfilePtr:        flag.String("csv", defaultCsvFile, "output file for csv data"),
 		debugPtr:          flag.Bool("debug", false, "outputs debug info"),
-		modePtr:           flag.String("mode", "aws", "run mode, needs to be one of aws, cm or crosscheck"),
-		monthPtr:          flag.String("month", "", "context month in format yyyy-mm, only for aws or crosscheck modes"),
-		readcookiePtr:     flag.Bool("readcookie", true, "reads the cookie from the Chrome cookies database, only for cm or crosscheck modes"),
-		reportFilePtr:     flag.String("report", fmt.Sprintf("report-%s.txt", nowStr), "output file for data consistency report"),
+		modePtr:           flag.String("mode", "aws", `run mode, needs to be one of "aws", "cm" or "crosscheck"`),
+		monthPtr:          flag.String("month", defaultMonth, `context month in format yyyy-mm, only for "aws" or "crosscheck" modes`),
+		outputTypePtr:     flag.String("output", "gsheet", `output destination, needs to be one of "csv" or "gsheet"`),
+		readcookiePtr:     flag.Bool("readcookie", true, `reads the cookie from the Chrome cookies database, only for "cm" or "crosscheck" modes`),
+		reportFilePtr:     flag.String("report", defaultReportFile, "output file for data consistency report"),
 		taggedAccountsPtr: flag.Bool("taggedaccounts", false, "use the AWS tags as account list source"),
 	}
 	flag.Parse()
 
-	// FIXME:  These should be provided externally
-	oauthTokenCache := usr.HomeDir + "/.config/gcloud/token_cache.json"
-	awsProfileName := "developer-billing"
+	accountsFile, err := loadAccountsFile(*options.accountsFilePtr)
+	if err != nil {
+		log.Fatalf("[main] error loading accounts file: %v", err)
+	}
+	if len(accountsFile.Configuration) == 0 {
+		log.Fatalf("[main] error in accounts file: empty or missing \"configuration\" section")
+	}
+	if len(accountsFile.Providers) == 0 {
+		log.Fatalf("[main] error in accounts file: empty or missing \"cloud_providers\" section")
+	}
 
-	awsPuller := NewAwsPuller(awsProfileName, *options.debugPtr)
+	awsConfig := getMapKeyValue(accountsFile.Configuration, "aws", "configuration")
+	awsProfile := awsConfig["profile"]
+	if awsProfile == "" {
+		awsProfile = "default"
+		log.Printf(
+			"[main] no \"profile\" key found in the \"aws\" section of the configuration file; "+
+				"using AWS credentials profile %q",
+			awsProfile,
+		)
+	}
+	awsPuller := NewAwsPuller(awsProfile, *options.debugPtr)
+
 	if *options.awsWriteTagsPtr {
 		writeAwsTags(awsPuller, options)
 		os.Exit(0)
@@ -121,18 +149,34 @@ func main() {
 	reportFile := getReportFile(options)
 	defer closeFile(reportFile)
 
-	accounts, sortedAccountKeys := awsPuller.getAwsAccounts(options)
+	awsAccounts, sortedAccountKeys := awsPuller.getAwsAccounts(accountsFile, options)
 
 	switch *options.modePtr {
 	case "aws":
-		client := getGoogleOAuthHttpClient(oauthTokenCache)
-		sheetData := awsPuller.pullAwsByAccount(accounts, sortedAccountKeys, options, reportFile)
-		// FIXME:  Use a command line option to select one of CSV or GSheet.
-		err = writeCsvFromSheet(outfile, sheetData)
+		var client *http.Client
+		refTime, err := time.Parse("2006-01", *options.monthPtr)
 		if err != nil {
-			log.Fatalf("[main] error writing to output file: %v", err)
+			log.Fatalf("[main] error parsing month value, %q: %v", *options.monthPtr, err)
 		}
-		postToGSheet(sheetData, *options.monthPtr, client)
+
+		if *options.outputTypePtr == "gsheet" {
+			oauthConfig := getMapKeyValue(accountsFile.Configuration, "oauth", "configuration")
+			client = getGoogleOAuthHttpClient(oauthConfig)
+		}
+
+		sheetData := awsPuller.pullAwsByAccount(awsAccounts, sortedAccountKeys, options, reportFile)
+
+		if *options.outputTypePtr == "gsheet" {
+			gsheetConfig := getMapKeyValue(accountsFile.Configuration, "gsheet", "base")
+			postToGSheet(sheetData, client, gsheetConfig, refTime)
+		}
+
+		if *options.outputTypePtr == "csv" {
+			err = writeCsvFromSheet(outfile, sheetData)
+			if err != nil {
+				log.Fatalf("[main] error writing to output file: %v", err)
+			}
+		}
 	case "cm":
 		var csvData [][]string
 		cookie, err := retrieveCookie(*options.cookiePtr, *options.readcookiePtr, *options.cookieDbPtr)
@@ -142,7 +186,7 @@ func main() {
 		cmPuller := NewCmPuller(cookie, *options.debugPtr)
 		for _, accountKey := range sortedAccountKeys {
 			group := accountKey
-			accountList := accounts[accountKey]
+			accountList := awsAccounts[accountKey]
 			for _, account := range accountList {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)
 				csvData, _, err = pullCostManagement(*cmPuller, reportFile, account, csvData)
@@ -167,7 +211,7 @@ func main() {
 		cmPuller := NewCmPuller(cookie, *options.debugPtr)
 		for _, accountKey := range sortedAccountKeys {
 			group := accountKey
-			accountList := accounts[accountKey]
+			accountList := awsAccounts[accountKey]
 			for _, account := range accountList {
 				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)
 				var totalAws float64
@@ -212,21 +256,41 @@ func main() {
 	log.Println("[main] operation done")
 }
 
-func (a *AwsPuller) getAwsAccounts(options CommandLineOptions) (
-	accounts map[string][]AccountEntry,
-	sortedAccountKeys []string,
-) {
-	var err error
-	if *options.taggedAccountsPtr {
-		accounts, err = getAccountSetsFromAws(a)
+// getDefaultCookieStore encapsulates the platform-specific location of the
+// default browser cookie database file.
+//
+// TODO:  kooky.FindAllCookieStores() can handle this for us.
+func getDefaultCookieStore() string {
+	defaultCookieDb, _ := os.UserConfigDir()
+	if runtime.GOOS == "linux" {
+		defaultCookieDb = filepath.Join(defaultCookieDb, "google-chrome")
+	} else if runtime.GOOS == "darwin" {
+		defaultCookieDb = filepath.Join(defaultCookieDb, "Google/Chrome")
 	} else {
-		accounts, err = getAccountSetsFromFile(*options.accountsFilePtr)
+		log.Printf("[main] unexpected platform:  %q\n", runtime.GOOS)
 	}
-	if err != nil {
-		log.Fatalf("[getAwsAccounts] error getting accounts list: %v", err)
+	defaultCookieDb = filepath.Join(defaultCookieDb, "Default/Cookies")
+	return defaultCookieDb
+}
+
+func (a *AwsPuller) getAwsAccounts(
+	accountsFile AccountsFile,
+	options CommandLineOptions,
+) (accounts map[string][]AccountEntry, keys []string) {
+	//var accounts map[string][]AccountEntry
+	if *options.taggedAccountsPtr {
+		a, err := getAccountSetsFromAws(a)
+		if err != nil {
+			log.Fatalf("[getAwsAccounts] error getting accounts list: %v", err)
+		}
+		accounts = a
+	} else {
+		accounts = getMapKeyValue(accountsFile.Providers, "aws", "cloud_providers")
 	}
-	sortedAccountKeys = sortedKeys(accounts)
-	return
+	if len(accounts) == 0 {
+		fmt.Println("[getAwsAccounts] Warning:  No AWS accounts found!")
+	}
+	return accounts, sortedKeys(accounts)
 }
 
 func (a *AwsPuller) pullAwsByAccount(
@@ -240,6 +304,9 @@ func (a *AwsPuller) pullAwsByAccount(
 	}
 	for _, group := range sortedAccountKeys {
 		accountList := accounts[group]
+		if len(accountList) == 0 {
+			log.Printf("[pullAwsByAccount] Warning: no accounts found in group %q!", group)
+		}
 		for _, account := range accountList {
 			log.Printf("[pullAwsByAccount] pulling data for account %s (group %s)\n", account.AccountID, group)
 			rowData, _, err := a.pullAwsAccount(
@@ -259,10 +326,11 @@ func (a *AwsPuller) pullAwsByAccount(
 }
 
 func writeAwsTags(awsPuller *AwsPuller, options CommandLineOptions) {
-	accounts, err := getAccountSetsFromFile(*options.accountsFilePtr)
+	accountsFile, err := loadAccountsFile(*options.accountsFilePtr)
 	if err != nil {
 		log.Fatalf("[writeAwsTags] error getting accounts list: %v", err)
 	}
+	accounts := getMapKeyValue(accountsFile.Providers, "aws", "cloud_providers")
 	err = awsPuller.WriteAwsTags(accounts)
 	if err != nil {
 		log.Fatalf("[writeAwsTags] error writing account tag: %v", err)
@@ -466,25 +534,28 @@ func writeReport(outfile *os.File, data string) {
 	}
 }
 
-func getAccountSetsFromFile(accountsFile string) (map[string][]AccountEntry, error) {
-	accounts := make(map[string][]AccountEntry)
-	yamlFile, err := os.ReadFile(accountsFile)
+func loadAccountsFile(accountsFileName string) (accountsFile AccountsFile, err error) {
+	yamlFile, err := os.ReadFile(accountsFileName)
 	if err != nil {
-		log.Printf("[getAccountSetsFromFile] error reading accounts file: %v ", err)
-		return nil, err
+		return accountsFile, fmt.Errorf("[loadAccountsFile] error loading accounts file: %v", err)
 	}
-	err = yaml.Unmarshal(yamlFile, accounts)
+	accountsFile = AccountsFile{
+		Configuration: make(map[string]map[string]string),
+		Providers:     make(map[string]map[string][]AccountEntry),
+	}
+	err = yaml.Unmarshal(yamlFile, accountsFile)
 	if err != nil {
-		log.Fatalf("[getAccountSetsFromFile] error unmarshalling accounts file: %v", err)
-		return nil, err
+		return accountsFile, fmt.Errorf("[loadAccountsFile] error unmarshalling accounts file: %v", err)
 	}
 	// set category manually on all entries
-	for category, accountEntries := range accounts {
-		for _, accountEntry := range accountEntries {
-			accountEntry.Category = category
+	for _, group := range accountsFile.Providers {
+		for category, accountEntries := range group {
+			for _, accountEntry := range accountEntries {
+				accountEntry.Category = category
+			}
 		}
 	}
-	return accounts, nil
+	return
 }
 
 func getAccountSetsFromAws(awsPuller *AwsPuller) (map[string][]AccountEntry, error) {
@@ -528,4 +599,19 @@ func getAccountSetsFromAws(awsPuller *AwsPuller) (map[string][]AccountEntry, err
 // and which ignores any errors.
 func closeFile(filename *os.File) {
 	_ = filename.Close()
+}
+
+// getMapKeyValue is a generic helper function which fetches a value from the
+// given key in the given map; if the key is not in the map, the program exits
+// with an error citing the supplied section string.
+func getMapKeyValue[V any](
+	configMap map[string]V,
+	key string,
+	section string,
+) (value V) {
+	if value, ok := configMap[key]; ok {
+		return value
+	}
+	log.Fatalf("Key %q is missing from the %q section of the configuration", key, section)
+	return
 }

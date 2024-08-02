@@ -11,12 +11,21 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
+
+// defaultTokenCachePath is the path, relative to the platform's user cache
+// directory, to the directory where cache files are stored.
+const defaultTokenCachePath = "gcloud"
+
+// tokenFileName is the name of the file which is used to store the cached
+// OAuth 2.0 access and refresh token values.
+const tokenFileName = "costpuller_token.json"
 
 // getGoogleOAuthHttpClient accepts the location of the Google OAuth 2.0 client
 // credentials file (which can be downloaded from https://console.developers.google.com,
@@ -26,11 +35,11 @@ import (
 //
 // The credentials file is used to construct a Google OAuth client
 // configuration which can be used either to obtain or refresh an access token.
-// The access token is cached in a file (token.json) located in the same
-// directory as the credentials file:  if the token file exists, this function
-// reads and refreshes the token; otherwise, this function prompts the user to
-// obtain an access code and uses that to request a new token; either way, the
-// new token is written to the cache file before returning.
+// The access and refresh tokens are cached in a file.  If the token file
+// exists, this function reads and refreshes the token; otherwise, this
+// function prompts the user to obtain an access code and uses that to request
+// a new token; either way, the new token is written to the cache file before
+// returning.
 //
 // If it is necessary to obtain an access code, this function provides the user
 // with a URL which directs the user's browser to perform the Google OAuth 2.0
@@ -42,8 +51,7 @@ import (
 // code for an access token (and refresh token).  The tokens are then cached to
 // allow this function to reuse them without requiring reauthorization by the
 // user.
-func getGoogleOAuthHttpClient(tokenFileName string) *http.Client {
-	var token *oauth2.Token
+func getGoogleOAuthHttpClient(oauthConfigMap map[string]string) *http.Client {
 	ctx := context.Background()
 
 	credObj, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/spreadsheets")
@@ -56,27 +64,66 @@ func getGoogleOAuthHttpClient(tokenFileName string) *http.Client {
 		log.Fatalf("Unable to construct a client configuration: %v", err)
 	}
 
-	tokenCacheFile, err := os.Open(tokenFileName)
+	token, tokenCachePath := getToken(oauthConfigMap, config, ctx)
+	cacheToken(token, tokenCachePath)
+
+	return config.Client(ctx, token)
+}
+
+func getToken(
+	oauthConfigMap map[string]string,
+	config *oauth2.Config,
+	ctx context.Context,
+) (token *oauth2.Token, tokenCachePath string) {
+	var tokenCacheFile *os.File
+	tokenCachePath, err := getCacheFileName(oauthConfigMap["tokenCachePath"])
+	if err == nil {
+		tokenCacheFile, err = os.Open(tokenCachePath)
+	}
 	if err == nil {
 		token = getCachedToken(config, tokenCacheFile, ctx)
 		closeFile(tokenCacheFile)
 	} else if errors.Is(err, os.ErrNotExist) {
-		token = getNewToken(config, ctx)
+		token = getNewToken(config, oauthConfigMap["port"], ctx)
 	} else {
-		log.Fatalf("Error accessing the token cache file, %q: %v", tokenFileName, err)
+		log.Fatalf("Unexpected error accessing the token cache file, %q: %v", tokenCachePath, err)
 	}
+	return
+}
 
-	newTokenCacheFile, err := os.OpenFile(tokenFileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
-	if err == nil {
-		log.Printf("Caching oauth token in %q.", tokenFileName)
-		err = json.NewEncoder(newTokenCacheFile).Encode(token)
-		closeFile(newTokenCacheFile)
+func cacheToken(token *oauth2.Token, tokenCachePath string) {
+	if tokenCachePath == "" {
+		log.Println("The token will not be cached.")
+	} else {
+		newTokenCacheFile, err := os.OpenFile(tokenCachePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+		if err == nil {
+			log.Printf("Caching oauth token in %q.", tokenCachePath)
+			err = json.NewEncoder(newTokenCacheFile).Encode(token)
+			closeFile(newTokenCacheFile)
+		}
+		if err != nil {
+			log.Printf("Unable to cache oauth token: %v", err)
+		}
 	}
-	if err != nil {
-		log.Printf("Unable to cache oauth token in %q: %v", tokenFileName, err)
-	}
+}
 
-	return config.Client(ctx, token)
+func getCacheFileName(tokenCachePath string) (string, error) {
+	if tokenCachePath == "" {
+		tokenCachePath = defaultTokenCachePath
+	}
+	if tokenCachePath[0] != '/' {
+		cacheDir, err := os.UserCacheDir()
+		if err != nil {
+			log.Printf("unable to determine cache directory: %v", err)
+			return "", fmt.Errorf("%w", os.ErrNotExist)
+		}
+		tokenCachePath = filepath.Join(cacheDir, tokenCachePath)
+		if err := os.MkdirAll(tokenCachePath, 0700); err != nil {
+			log.Printf("unable to create user cache dir, %q: %v", cacheDir, err)
+			return "", fmt.Errorf("%w", os.ErrNotExist)
+		}
+	}
+	return filepath.Join(tokenCachePath, tokenFileName), nil
 }
 
 // getCachedToken is a helper function which returns the cached tokens after
@@ -97,9 +144,12 @@ func getCachedToken(config *oauth2.Config, cacheFile *os.File, ctx context.Conte
 }
 
 // getNewToken is a helper function which prompts the user to create a new token.
-func getNewToken(config *oauth2.Config, ctx context.Context) *oauth2.Token {
+func getNewToken(config *oauth2.Config, listenerPort string, ctx context.Context) *oauth2.Token {
 	stateToken := getStateToken()
-	config.RedirectURL += ":" + "35355" // FIXME:  Arbitrary port number -- should be configurable
+	if listenerPort == "" {
+		listenerPort = "35355" // Arbitrary value
+	}
+	config.RedirectURL += ":" + listenerPort
 	authURL := config.AuthCodeURL(stateToken, oauth2.AccessTypeOffline)
 	fmt.Printf("Go to the following link in your browser to authorize access:\n%v\n", authURL)
 
@@ -125,8 +175,9 @@ func getStateToken() string {
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
-// getAuthCode waits for the redirect from the user's authentication request,
-// validates the result, and (hopefully) returns the authorization code.
+// getAuthCode validates the result of the redirect from the user's
+// authentication request, and returns the authorization code if one is
+// received; otherwise it exits the process with a failure.
 func getAuthCode(authResp url.Values, stateToken string) string {
 	if authResp.Get("state") != stateToken {
 		log.Fatalf(
@@ -188,13 +239,6 @@ func redirectListener(urlString string) url.Values {
 // handleRedirectResponse is a helper function which evaluates the redirect
 // query parameters and sends an appropriate response to the request.
 func handleRedirectResponse(w http.ResponseWriter, queryParams url.Values) {
-	log.Printf(
-		"Listener received redirect request:\n\tstate: %q\n\tauth_code: %q\n\terror: %q",
-		queryParams.Get("state"),
-		queryParams.Get("code"),
-		queryParams.Get("error"),
-	)
-
 	msg := `<!doctype html><html lang="en" dir="ltr"><body><h2>`
 	if queryParams.Get("code") == "" {
 		msg += "Failure -- no access code received!</h2>"
