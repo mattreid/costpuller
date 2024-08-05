@@ -11,6 +11,7 @@
 // customizing the operation of this tool.
 //
 // Providing Credentials
+//
 //  - AWS access is controlled in the conventional ways:  either via
 //    environment variables AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY or via
 //    ~/.aws/ config files created by the `awscli configure` command.  If using
@@ -28,6 +29,59 @@
 //    OAuth access code.  The tool then exchanges that for the tokens, which it
 //    writes to the cache file.
 //
+// The Output
+//
+//    This tool collects the billing data from the cloud provider for each
+//    account in the YAML file.  The data is post-processed with certain values
+//    being coalesced into category values.  The result is a single row with
+//    canonical columns.  The data can be output to a CSV file, or it can be
+//    loaded into a Google Spreadsheet.
+//
+// The Google Sheets Spreadsheet Configuration & Magic
+//
+//    The Google spreadsheet is selected by its ID which is configured in the
+//    "gsheet" subsection of the "configuration" section of the YAML file with
+//    the key, "spreadsheetId".  The value comes from the URL used to view the
+//    spreadsheet.
+//
+//    The raw data is loaded into a new "tab" or "sheet" in the spreadsheet.
+//    The sheet is named by expanding a name-template configured in the YAML
+//    file with the key "sheetNameTemplate".  Digits in the value are replaced
+//    with elements of the reference time timestamp, as described in
+//    https://pkg.go.dev/time#Layout: for instance, in "Raw Data 01/2006", the
+//    "01" would be replaced by the two-digit numerical month and "2006" would
+//    be replaced by the four-digit year.  The reference time can be specified
+//    with the `-month` command line option, as "-month 2024-08", but it
+//    defaults to the month previous to the current one.
+//
+//    The target sheet for the raw data is created by copying an existing
+//    template sheet in the spreadsheet whose name is configured with the key,
+//    "templateSheetName".  The first row of this sheet is reserved for column
+//    headers, and so the data is written starting at the second row.  The last
+//    column of the sheet is reserved for row totals, and so the data rows must
+//    fit in the preceding columns.  Also, in order for the tool to correctly
+//    determine the "totals" column, the template sheet must not include any
+//    columns after the "totals" column (any extra columns should be explicitly
+//    deleted).
+//
+//    Finally, the tool expects that the spreadsheet contains a "main sheet"
+//    which references the raw data sheets.  This sheet must be specified in
+//    the using YAML file using the key, "mainSheetName".  Unfortunately,
+//    Google Sheets seems to have a mal-feature which results in situations
+//    where references between sheets are not updated reliably.  For instance,
+//    creating a new sheet or, in many cases, even just updating it, will not
+//    refresh a reference to it in another sheet.  The accepted workaround for
+//    this is to copy and paste the cell references over themselves.  To effect
+//    this, the tool expects that there is a cell in the main sheet which
+//    contains the name of the raw data sheet and which is used for indirect
+//    lookups in the raw data sheet, moreover that the formulas containing the
+//    indirect references are found in the column immediately below this cell
+//    and that there is one entry for each row of data.  The tool will locate
+//    the cell which contains the sheet reference, copy the appropriate number
+//    of cells below it, and paste those values over themselves.  The paste
+//    operation is non-destructive, so it is not a problem if it encompasses
+//    unrelated cells, but it must include all cells with references to the
+//    new sheet.
 
 package main
 
@@ -143,9 +197,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	outfile := getCsvFile(options)
-	defer closeFile(outfile)
-
 	reportFile := getReportFile(options)
 	defer closeFile(reportFile)
 
@@ -154,35 +205,43 @@ func main() {
 	switch *options.modePtr {
 	case "aws":
 		var client *http.Client
+		var outfile *os.File
+
 		refTime, err := time.Parse("2006-01", *options.monthPtr)
 		if err != nil {
 			log.Fatalf("[main] error parsing month value, %q: %v", *options.monthPtr, err)
 		}
 
-		if *options.outputTypePtr == "gsheet" {
+		if *options.outputTypePtr == "csv" {
+			outfile = getCsvFile(options)
+			defer closeFile(outfile)
+		} else if *options.outputTypePtr == "gsheet" {
 			oauthConfig := getMapKeyValue(accountsFile.Configuration, "oauth", "configuration")
 			client = getGoogleOAuthHttpClient(oauthConfig)
+		} else {
+			log.Fatalf("[main] Unexpected value for output type, %q", *options.outputTypePtr)
 		}
 
 		sheetData := awsPuller.pullAwsByAccount(awsAccounts, sortedAccountKeys, options, reportFile)
-
-		if *options.outputTypePtr == "gsheet" {
-			gsheetConfig := getMapKeyValue(accountsFile.Configuration, "gsheet", "base")
-			postToGSheet(sheetData, client, gsheetConfig, refTime)
-		}
 
 		if *options.outputTypePtr == "csv" {
 			err = writeCsvFromSheet(outfile, sheetData)
 			if err != nil {
 				log.Fatalf("[main] error writing to output file: %v", err)
 			}
+		} else if *options.outputTypePtr == "gsheet" {
+			gsheetConfig := getMapKeyValue(accountsFile.Configuration, "gsheet", "base")
+			postToGSheet(sheetData, client, gsheetConfig, refTime)
 		}
+
 	case "cm":
 		var csvData [][]string
 		cookie, err := retrieveCookie(*options.cookiePtr, *options.readcookiePtr, *options.cookieDbPtr)
 		if err != nil {
 			log.Fatalf("[main] error retrieving cookie: %v", err)
 		}
+		outfile := getCsvFile(options)
+		defer closeFile(outfile)
 		cmPuller := NewCmPuller(cookie, *options.debugPtr)
 		for _, accountKey := range sortedAccountKeys {
 			group := accountKey
@@ -204,6 +263,8 @@ func main() {
 		if *options.monthPtr == "" || *options.costTypePtr == "" {
 			log.Fatal("[main] aws mode requested, but no month and/or cost type given (use --month=yyyy-mm, --costtype=type)")
 		}
+		outfile := getCsvFile(options)
+		defer closeFile(outfile)
 		cookie, err := retrieveCookie(*options.cookiePtr, *options.readcookiePtr, *options.cookieDbPtr)
 		if err != nil {
 			log.Fatalf("[main] error retrieving cookie: %v", err)
@@ -407,7 +468,6 @@ func (a *AwsPuller) pullAwsAccount(
 	costType string,
 	reportFile *os.File,
 ) (normalized *sheets.RowData, total float64, err error) {
-	log.Printf("[pullAwsAccount] pulling AWS data for account %s", account.AccountID)
 	result, err := a.PullData(account.AccountID, month, costType)
 	if err != nil {
 		log.Fatalf("[pullAwsAccount] error pulling data from AWS for account %s: %v", account.AccountID, err)
@@ -420,8 +480,6 @@ func (a *AwsPuller) pullAwsAccount(
 			err,
 		)
 		writeReport(reportFile, account.AccountID+": "+err.Error())
-	} else {
-		log.Printf("[pullAwsAccount] successful consistency check for data on account %s\n", account.AccountID)
 	}
 	normalized, err = a.NormalizeResponse(group, month, account.AccountID, result)
 	if err != nil {
