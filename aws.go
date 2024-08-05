@@ -48,12 +48,9 @@ func (a *AwsPuller) PullData(accountID string, month string, costType string) (m
 	endOfMonth := now.With(focusMonth).EndOfMonth().Add(time.Hour * 24)
 	dayStart := beginningOfMonth.Format("2006-01-02")
 	dayEnd := endOfMonth.Format("2006-01-02")
-	log.Printf("[pullawsdata] using date range %s to %s", dayStart, dayEnd)
 	// retrieve AWS cost
 	svc := costexplorer.New(a.session)
 	granularity := "MONTHLY"
-	metricsBlendedCost := costType
-	log.Printf("[pullawsdata] using cost type %s", metricsBlendedCost)
 	dimensionLinkedAccountKey := "LINKED_ACCOUNT"
 	dimensionLinkedAccountValue := accountID
 	groupByDimension := "DIMENSION"
@@ -64,7 +61,7 @@ func (a *AwsPuller) PullData(accountID string, month string, costType string) (m
 			End:   &dayEnd,
 		},
 		Granularity: &granularity,
-		Metrics:     []*string{&metricsBlendedCost},
+		Metrics:     []*string{&costType},
 		Filter: &costexplorer.Expression{
 			Dimensions: &costexplorer.DimensionValues{
 				Key:    &dimensionLinkedAccountKey,
@@ -92,7 +89,7 @@ func (a *AwsPuller) PullData(accountID string, month string, costType string) (m
 			End:   &dayEnd,
 		},
 		Granularity: &granularity,
-		Metrics:     []*string{&metricsBlendedCost},
+		Metrics:     []*string{&costType},
 		Filter: &costexplorer.Expression{
 			Dimensions: &costexplorer.DimensionValues{
 				Key:    &dimensionLinkedAccountKey,
@@ -109,13 +106,13 @@ func (a *AwsPuller) PullData(accountID string, month string, costType string) (m
 		log.Println(*costAndUsageTotal)
 	}
 	// decode total value
-	totalAWSStr := *(*(*costAndUsageTotal.ResultsByTime[0]).Total[metricsBlendedCost]).Amount
+	totalAWSStr := *costAndUsageTotal.ResultsByTime[0].Total[costType].Amount
 	totalAWS, err := strconv.ParseFloat(totalAWSStr, 64)
 	if err != nil {
 		log.Printf("[pullawsdata] error converting aws total value: %v", err)
 		return nil, err
 	}
-	unitAWS := *(*(*costAndUsageTotal.ResultsByTime[0]).Total[metricsBlendedCost]).Unit
+	unitAWS := *costAndUsageTotal.ResultsByTime[0].Total[costType].Unit
 	if unitAWS != "USD" {
 		log.Printf("[pullawsdata] pulled unit is not USD: %s", unitAWS)
 		return nil, fmt.Errorf("pulled unit is not USD: %s", unitAWS)
