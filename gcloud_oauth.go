@@ -27,30 +27,17 @@ const defaultTokenCachePath = "gcloud"
 // OAuth 2.0 access and refresh token values.
 const tokenFileName = "costpuller_token.json"
 
-// getGoogleOAuthHttpClient accepts the location of the Google OAuth 2.0 client
+// getGoogleOAuthHttpClient accepts a mapping of configuration value strings
+// and returns an HTTP client which can be used to make authorized Google API
+// requests.  The token is obtained either using values cached in a local file
+// or by prompting the user to perform an authorization dialog; either way, the
+// new token is written to the cache file before returning.
+//
+// The Google OAuth 2.0 Client configuration is constructed from a local
 // credentials file (which can be downloaded from https://console.developers.google.com,
-// under "Credentials") and returns an HTTP client which can be used to make
-// Google API requests.  (Currently, the scope of the authorization is limited
-// to the Google Sheets APIs.)
-//
-// The credentials file is used to construct a Google OAuth client
-// configuration which can be used either to obtain or refresh an access token.
-// The access and refresh tokens are cached in a file.  If the token file
-// exists, this function reads and refreshes the token; otherwise, this
-// function prompts the user to obtain an access code and uses that to request
-// a new token; either way, the new token is written to the cache file before
-// returning.
-//
-// If it is necessary to obtain an access code, this function provides the user
-// with a URL which directs the user's browser to perform the Google OAuth 2.0
-// authentication and authorization process.  The completion of that process
-// redirects the user's browser to send a request to a listener which this
-// function set up.  The redirect request contains a state token provided by
-// this function and the access code provided by Google.  If the state token
-// matches, then this function sends a request to Google to exchange the access
-// code for an access token (and refresh token).  The tokens are then cached to
-// allow this function to reuse them without requiring reauthorization by the
-// user.
+// under "Credentials").  It is located using the default mechanisms (e.g., in
+// ${HOME}/.config/gcloud/application_default_credentials.json).  (Currently,
+// the scope of the authorization is limited to the Google Sheets APIs.)
 func getGoogleOAuthHttpClient(oauthConfigMap map[string]string) *http.Client {
 	ctx := context.Background()
 
@@ -70,6 +57,9 @@ func getGoogleOAuthHttpClient(oauthConfigMap map[string]string) *http.Client {
 	return config.Client(ctx, token)
 }
 
+// getToken is a helper function which extracts configuration information from
+// the supplied mapping and returns either a cached token, if available, or a
+// new token.
 func getToken(
 	oauthConfigMap map[string]string,
 	config *oauth2.Config,
@@ -91,6 +81,10 @@ func getToken(
 	return
 }
 
+// cacheToken is a helper function which accepts a token and a file path and
+// stores the token in the indicated file.  The contents of the file are
+// replaced with the new value.  If the path is blank, the function prints a
+// message and returns; other errors result in exiting the process.
 func cacheToken(token *oauth2.Token, tokenCachePath string) {
 	if tokenCachePath == "" {
 		log.Println("The token will not be cached.")
@@ -107,6 +101,12 @@ func cacheToken(token *oauth2.Token, tokenCachePath string) {
 	}
 }
 
+// getCacheFileName accepts a file path to the directory containing the token
+// cache file and returns an absolute path to the cached token file or an
+// error.  If the input path is an empty string, the default path is used; if
+// the path is relative, it is prefixed with the platform's user configuration
+// directory.  The token file name is appended to the path and the result is
+// returned.
 func getCacheFileName(tokenCachePath string) (string, error) {
 	if tokenCachePath == "" {
 		tokenCachePath = defaultTokenCachePath
@@ -126,8 +126,9 @@ func getCacheFileName(tokenCachePath string) (string, error) {
 	return filepath.Join(tokenCachePath, tokenFileName), nil
 }
 
-// getCachedToken is a helper function which returns the cached tokens after
-// refreshing them.
+// getCachedToken is a helper function which reads a cached token from the
+// provided file, refreshes it using the provided configuration and context,
+// and returns the resulting token.
 func getCachedToken(config *oauth2.Config, cacheFile *os.File, ctx context.Context) *oauth2.Token {
 	token := &oauth2.Token{}
 	err := json.NewDecoder(cacheFile).Decode(token)
@@ -143,7 +144,18 @@ func getCachedToken(config *oauth2.Config, cacheFile *os.File, ctx context.Conte
 	return token
 }
 
-// getNewToken is a helper function which prompts the user to create a new token.
+// getNewToken is a helper function which prompts the user to use their browser
+// to request a new token, obtains the access code when the request is
+// redirected to the local listener, exchanges the access code for an access
+// token and a refresh token, and returns the token-pair.  The supplied
+// configuration is used to access the OAuth 2.0 client configuration to
+// generate the access request URL; the redirect URL is modified to include
+// a custom port (otherwise, it would default to port 80, which is not
+// generally available); and, a random number ("state") is included in the
+// request and checked in the redirect to prevent man-in-the-middle attacks.
+// After prompting the user, a local listener for the redirect request is
+// started, and execution waits for the redirected request which includes the
+// access code in the request query parameters.
 func getNewToken(config *oauth2.Config, listenerPort string, ctx context.Context) *oauth2.Token {
 	stateToken := getStateToken()
 	if listenerPort == "" {
@@ -151,7 +163,7 @@ func getNewToken(config *oauth2.Config, listenerPort string, ctx context.Context
 	}
 	config.RedirectURL += ":" + listenerPort
 	authURL := config.AuthCodeURL(stateToken, oauth2.AccessTypeOffline)
-	fmt.Printf("Go to the following link in your browser to authorize access:\n%v\n", authURL)
+	fmt.Printf("\nGo to the following link in your browser to authorize access:\n%v\n\n", authURL)
 
 	// Listen for the redirect request, then extract the authorization code
 	// from the resulting query params.
@@ -167,8 +179,8 @@ func getNewToken(config *oauth2.Config, listenerPort string, ctx context.Context
 }
 
 // getStateToken creates a random state token which is used to validate the
-// OAuth redirect request.  The token base64-encoded SHA256 hash of the current
-// time as a string
+// OAuth redirect request.  The token is the base64-encoded SHA256 hash of the
+// current time as a string.
 func getStateToken() string {
 	h := sha256.New()
 	h.Write([]byte(time.Now().Format("20060102150405000000")))
@@ -176,8 +188,8 @@ func getStateToken() string {
 }
 
 // getAuthCode validates the result of the redirect from the user's
-// authentication request, and returns the authorization code if one is
-// received; otherwise it exits the process with a failure.
+// authorization request, and returns the access code if one is received;
+// otherwise it exits the process with a failure.
 func getAuthCode(authResp url.Values, stateToken string) string {
 	if authResp.Get("state") != stateToken {
 		log.Fatalf(
@@ -197,22 +209,19 @@ func getAuthCode(authResp url.Values, stateToken string) string {
 }
 
 // redirectListener is a helper function used in the creation of the Google API
-// client.  Intended to be run as a goroutine, it sets up a micro-webserver
-// which listens for a single request on the provided host address.  The
-// address may include a port; if omitted, it uses port 80.  Errors parsing the
-// redirect URL input or starting the micro-webserver are logged with Fatalf()
-// which causes the process to terminate.
+// client.  It sets up a micro-webserver which listens for a single request to
+// the provided URL.  Errors parsing the redirect URL input or starting the
+// micro-webserver are logged with Fatalf() which exits the process.
 //
-// When the request is received, the query parameters of the request
-// (presumably the state token and the authorization token) are sent on the
-// provided channel, the request is acknowledged, the webserver is shut down,
-// and all the goroutine threads exit.  The request (in the user's browser)
-// looks something like this:
+// When the request is received, the request is acknowledged, the webserver is
+// shut down, and the query parameters of the request (presumably the state
+// token and the access code; or an error) are returned.  The request (in the
+// user's browser) looks something like this:
 //
 //	http://localhost/?state=<state_token>&code=<auth_code>&scope=<auth_scopes>
 func redirectListener(urlString string) url.Values {
-	// This variable is set by the request handler and returned after the
-	// micro-webserver exits.
+	// This variable is set by the request handler (it is included in the
+	// function's closure) and returned after the micro-webserver exits.
 	var queryParams url.Values
 
 	// Configure the micro-webserver, add a handler to it for the default
@@ -227,6 +236,9 @@ func redirectListener(urlString string) url.Values {
 		// wait for this request to finish processing.
 		go requestShutdown(&server)
 	})
+
+	// Run the webserver, listening for and dispatching requests, until
+	// shutdown is requested.
 	if err := server.ListenAndServe(); err != nil {
 		if !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("Error running redirect listener: %v", err)
@@ -245,11 +257,10 @@ func handleRedirectResponse(w http.ResponseWriter, queryParams url.Values) {
 		if queryParams.Get("error") != "" {
 			msg += "<h3>Error:  " + queryParams.Get("error") + "</h3>"
 		}
-		msg += "<p>(You may close this browser window.)"
 	} else {
-		msg += "Success!  Access code received.</h2><p>You may close this browser window."
+		msg += "Success!  Access code received.</h2>"
 	}
-	msg += "</body></html>"
+	msg += "<p>You may close this browser window.</body></html>"
 	_, err := fmt.Fprint(w, msg)
 	if err != nil {
 		log.Printf("Error writing response to redirect request: %v", err)
@@ -261,21 +272,22 @@ func handleRedirectResponse(w http.ResponseWriter, queryParams url.Values) {
 func requestShutdown(server *http.Server) {
 	err := server.Shutdown(context.Background())
 	if err != nil {
-		log.Printf("Error shutting down redirect listener: %v", err)
+		log.Fatalf("Error shutting down redirect listener: %v", err)
 	}
 }
 
 // RedirectUrlPattern matches a host (e.g., "localhost" or a FQDN) with an
 // optional "http" schema and an optional port.  This is the location provided
-// in the OAuth 2.0 client configuration where flow redirects the
-// authentication request after it has been granted or denied.  The schema, if
-// any is ignored; path specifications are not supported -- only host (and
-// optionally port) should be provided.  The host must resolve to a NIC on the
-// machine where this program is being run.
+// in the OAuth 2.0 client configuration where the authorization flow redirects
+// the request after it has been granted or denied.  The schema, if any is
+// ignored; path specifications are not supported -- only host (and optionally
+// port) should be provided.  The host must resolve to a NIC on the machine
+// where this program is being run.
 var RedirectUrlPattern = regexp.MustCompile(`^(?:http://)?([^:/]+)(:[0-9]{1,5})$`)
 
 // getListenAddress validates the redirect URL, strips the schema if present,
-// sets the address to the host, and appends the port if present.
+// sets the address to the host, appends the port if present, and returns the
+// result.
 func getListenAddress(urlString string) string {
 	matches := RedirectUrlPattern.FindStringSubmatch(urlString)
 	if matches == nil {
