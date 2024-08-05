@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
 	"log"
@@ -22,28 +21,6 @@ func postToGSheet(sheetData []*sheets.RowData, client *http.Client, configMap ma
 		log.Fatalf("Unable to create Google Sheets client: %v", err)
 	}
 
-	spreadsheetId := getMapKeyValue(configMap, "spreadsheetId", "gsheet")
-	sheetObject, err := srv.Spreadsheets.Get(spreadsheetId).Fields("properties/title", "sheets").Do()
-	if err != nil {
-		log.Fatalf("Error retrieving spreadsheet: %v", err)
-	}
-
-	mainSheetName := getMapKeyValue(configMap, "mainSheetName", "gsheet")
-	mainSheetID, found := getSheetIDFromName(sheetObject, mainSheetName)
-	if !found {
-		log.Fatalf("Error updating spreadsheet sheet: main sheet %q not found", mainSheetName)
-	}
-
-	templateSheetName := getMapKeyValue(configMap, "templateSheetName", "gsheet")
-	srcID, found := getSheetIDFromName(sheetObject, templateSheetName)
-	if !found {
-		log.Fatalf("Error updating spreadsheet sheet: template sheet %q not found", templateSheetName)
-	}
-
-	// FIXME:  Need to make sure that the incoming data is compatible with the template.  I.e., that
-	//  sheetObject.Sheets[srcID].Properties.GridProperties.ColumnCount == len(sheetData[0].Values)
-	//  and use the column count to set up the GridRange in createNewSheet().
-
 	// Construct the name for the raw data sheet using the template-name from
 	// the configuration as a format specifier for time.Format()
 	// (see https://pkg.go.dev/time#Layout).  Format fields (represented by
@@ -53,6 +30,24 @@ func postToGSheet(sheetData []*sheets.RowData, client *http.Client, configMap ma
 	// will be "Raw Data 08/2024".
 	newSheetName := ref.Format(getMapKeyValue(configMap, "sheetNameTemplate", "gsheet"))
 
+	spreadsheetId := getMapKeyValue(configMap, "spreadsheetId", "gsheet")
+	log.Println("Fetching Spreadsheet information")
+	sheetObject, err := srv.Spreadsheets.
+		Get(spreadsheetId).
+		Fields("sheets/properties(gridProperties(columnCount,rowCount),sheetId,title)", "spreadsheetId").
+		Do()
+	if err != nil {
+		log.Fatalf("Error retrieving spreadsheet: %v", err)
+	}
+
+	newDataRef := getUpdateLocation(srv, sheetObject, newSheetName, len(sheetData[0].Values), configMap)
+
+	mainSheetName := getMapKeyValue(configMap, "mainSheetName", "gsheet")
+	mainSheetID, msIndex := getSheetIDFromName(sheetObject, mainSheetName)
+	if msIndex < 0 {
+		log.Fatalf("Error updating spreadsheet sheet: main sheet %q not found", mainSheetName)
+	}
+
 	cells, err := srv.Spreadsheets.Values.Get(spreadsheetId, "'"+mainSheetName+"'!A1:ZZZ9999").Do()
 	if err != nil {
 		log.Fatalf("Error fetching main sheet (%q) values: %v", mainSheetID, err)
@@ -61,8 +56,44 @@ func postToGSheet(sheetData []*sheets.RowData, client *http.Client, configMap ma
 	if mainSheetRef == nil {
 		log.Fatalf("No reference to %q found in main sheet (%q)", newSheetName, mainSheetName)
 	}
-	newDataRef := createNewSheet(srv, spreadsheetId, newSheetName, srcID, int64(len(sheetObject.Sheets)))
 	loadNewData(srv, spreadsheetId, sheetData, newDataRef, mainSheetRef)
+}
+
+// getUpdateLocation is a helper function which returns the GridRange to
+// receive the new data.  This includes looking up the existing sheet or
+// creating a new one.
+func getUpdateLocation(
+	srv *sheets.Service,
+	sheetObject *sheets.Spreadsheet,
+	newSheetName string,
+	newColumnCount int,
+	configMap map[string]string,
+) (newDataRef *sheets.GridRange) {
+	_, newIndex := getSheetIDFromName(sheetObject, newSheetName)
+	if newIndex < 0 {
+		templateSheetName := getMapKeyValue(configMap, "templateSheetName", "gsheet")
+		srcID, srcIndex := getSheetIDFromName(sheetObject, templateSheetName)
+		if srcIndex < 0 {
+			log.Fatalf("Error updating spreadsheet sheet: template sheet %q not found", templateSheetName)
+		}
+
+		srcColumnCount := sheetObject.Sheets[srcIndex].Properties.GridProperties.ColumnCount
+		if int64(newColumnCount) >= srcColumnCount {
+			log.Fatalf(
+				"Unexpected column count for data:  received %d; expected fewer than %d",
+				srcColumnCount,
+				newColumnCount,
+			)
+		}
+
+		log.Printf("Adding new sheet %q", newSheetName)
+		spreadsheetId := sheetObject.SpreadsheetId
+		newDataRef = createNewSheet(srv, spreadsheetId, newSheetName, srcID, int64(len(sheetObject.Sheets)))
+	} else {
+		log.Printf("Warning:  overwriting sheet %q", newSheetName)
+		newDataRef = getDataGridRange(sheetObject.Sheets[newIndex].Properties)
+	}
+	return newDataRef
 }
 
 // loadNewData updates the data cells (avoiding the header row and the totals
@@ -77,7 +108,7 @@ func loadNewData(
 	newSheetRef *sheets.GridRange,
 	mainSheetRef *sheets.GridRange,
 ) {
-	buResp, err := srv.Spreadsheets.BatchUpdate(spreadsheetId, &sheets.BatchUpdateSpreadsheetRequest{
+	_, err := srv.Spreadsheets.BatchUpdate(spreadsheetId, &sheets.BatchUpdateSpreadsheetRequest{
 		Requests: []*sheets.Request{
 			{
 				UpdateCells: &sheets.UpdateCellsRequest{
@@ -99,7 +130,6 @@ func loadNewData(
 	if err != nil {
 		log.Fatalf("Error updating sheet: %v", err)
 	}
-	fmt.Println(buResp)
 }
 
 // createNewSheet creates a new sheet in the provided spreadsheet using the
@@ -120,18 +150,27 @@ func createNewSheet(srv *sheets.Service, spreadsheetId string, newSheetName stri
 		},
 	}).Do()
 	if err != nil {
-		// FIXME:  Consider ignoring this error (and reusing the existing sheet)
-		//  Of course, this means that we have to look up the ID for the existing sheet.
 		log.Fatalf("Error duplicating sheet: %v", err)
 	}
 
-	// FIXME:  hard-coding the ends (particularly the column) seems like a botch.
+	props := buResp.Replies[0].DuplicateSheet.Properties
+	return getDataGridRange(props)
+}
+
+// getGridRange is a helper function which produces a GridRange describing the
+// contents of a sheet, minus the header row and last column, given the sheet's
+// properties object.
+func getDataGridRange(props *sheets.SheetProperties) *sheets.GridRange {
+	cc := props.GridProperties.ColumnCount
+	rc := props.GridProperties.RowCount
+	id := props.SheetId
+
 	return &sheets.GridRange{
-		EndColumnIndex:   13,
-		EndRowIndex:      9999,
-		SheetId:          buResp.Replies[0].DuplicateSheet.Properties.SheetId,
+		EndColumnIndex:   cc - 1, // Skip "Totals" column
+		EndRowIndex:      rc,
+		SheetId:          id,
 		StartColumnIndex: 0,
-		StartRowIndex:    1,
+		StartRowIndex:    1, // Skip header row
 	}
 }
 
@@ -171,11 +210,11 @@ func getNewSheetReference(
 // getSheetIDFromName is a helper function which returns the sheet ID for the
 // sheet (tab) with the given name in the specified spreadsheet.  Returns a
 // boolean indicating if the name was not found.
-func getSheetIDFromName(sheetObject *sheets.Spreadsheet, sheetName string) (int64, bool) {
-	for _, sheet := range sheetObject.Sheets {
+func getSheetIDFromName(sheetObject *sheets.Spreadsheet, sheetName string) (int64, int) {
+	for index, sheet := range sheetObject.Sheets {
 		if sheet.Properties.Title == sheetName {
-			return sheet.Properties.SheetId, true
+			return sheet.Properties.SheetId, index
 		}
 	}
-	return -1, false
+	return -1, -1
 }
