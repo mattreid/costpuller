@@ -27,13 +27,13 @@ type AwsPuller struct {
 
 // NewAwsPuller returns a new AWS client.
 func NewAwsPuller(profile string, debug bool) *AwsPuller {
-	awsp := new(AwsPuller)
-	awsp.session = session.Must(session.NewSessionWithOptions(session.Options{
+	awsP := new(AwsPuller)
+	awsP.session = session.Must(session.NewSessionWithOptions(session.Options{
 		Profile:           profile,
 		SharedConfigState: session.SharedConfigEnable,
 	}))
-	awsp.debug = debug
-	return awsp
+	awsP.debug = debug
+	return awsP
 }
 
 // PullData retrieves a raw data set.
@@ -182,7 +182,7 @@ func (a *AwsPuller) NormalizeResponse(
 ) (*sheets.RowData, error) {
 	// Format is:
 	//   [0-9]    group, date, clusterId, accountId, PO, clusterType, usageType, product, infra, numberUsers,
-	//   [10-18]  dataTransfer, machines, storage, keyMgmnt, registrar, dns, other, tax, rebate
+	//   [10-18]  dataTransfer, machines, storage, keyManagement, registrar, dns, other, tax, rebate
 	// Select entries 0, 1, 3, 8, and 10-18; omit entries 2, 4, 5, 6, 7, and 9
 	output := sheets.RowData{Values: make([]*sheets.CellData, 13)}
 	// set group
@@ -196,7 +196,7 @@ func (a *AwsPuller) NormalizeResponse(
 
 	// skip numberUsers; pick out and set the values for dataTransfer, storage,
 	// dns, and tax; sum the remaining values into categories for machines,
-	// keyMgmnt, and "other".
+	// keyManagement, and "other".
 	var ec2Val float64 = 0
 	var kmVal float64 = 0
 	var otherVal float64 = 0
@@ -250,18 +250,18 @@ func (a *AwsPuller) CheckResponseConsistency(account AccountEntry, results map[s
 		total += value
 	}
 	// check account meta deviation if standard value is given
-	if account.Standardvalue > 0 {
-		diff := account.Standardvalue - total
+	if account.StandardValue > 0 {
+		diff := account.StandardValue - total
 		diffAbs := math.Abs(diff)
-		diffPercent := (diffAbs / account.Standardvalue) * 100
-		if diffPercent > float64(account.Deviationpercent) {
+		diffPercent := (diffAbs / account.StandardValue) * 100
+		if diffPercent > float64(account.DeviationPercent) {
 			return total, fmt.Errorf(
 				"deviation check failed: deviation is %.2f (%.2f%%), max deviation allowed is %d%% (value was %.2f, standard value %.2f)",
 				diffAbs,
 				diffPercent,
-				account.Deviationpercent,
+				account.DeviationPercent,
 				total,
-				account.Standardvalue,
+				account.StandardValue,
 			)
 		}
 	}

@@ -54,7 +54,7 @@
 //    with the `-month` command line option, as "-month 2024-08", but it
 //    defaults to the month previous to the current one.
 //
-//    The target sheet for the raw data is created by copying an existing
+//    The tool creates the target sheet for the raw data by copying an existing
 //    template sheet in the spreadsheet whose name is configured with the key,
 //    "templateSheetName".  The first row of this sheet is reserved for column
 //    headers, and so the data is written starting at the second row.  The last
@@ -119,8 +119,8 @@ type AccountsFile struct {
 // AccountEntry describes an account with metadata.
 type AccountEntry struct {
 	AccountID        string  `yaml:"accountid"`
-	Standardvalue    float64 `yaml:"standardvalue"`
-	Deviationpercent int     `yaml:"deviationpercent"`
+	StandardValue    float64 `yaml:"standardvalue"`
+	DeviationPercent int     `yaml:"deviationpercent"`
 	Category         string  `yaml:"category"`
 	Description      string  `yaml:"description"`
 }
@@ -405,8 +405,8 @@ func getAccountSetsFromAws(awsPuller *AwsPuller) (map[string][]AccountEntry, err
 				}
 				accounts[category] = append(accounts[category], AccountEntry{
 					AccountID:        accountID,
-					Standardvalue:    0,
-					Deviationpercent: 0,
+					StandardValue:    0,
+					DeviationPercent: 0,
 					Category:         category,
 					Description:      description,
 				})
