@@ -86,39 +86,26 @@
 package main
 
 import (
-	"bufio"
 	"encoding/csv"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"net/http"
 	"os"
-	"path/filepath"
-	"runtime"
 	"sort"
-	"strings"
 	"time"
 
-	"github.com/browserutils/kooky"
-	"github.com/browserutils/kooky/browser/chrome"
 	"google.golang.org/api/sheets/v4"
 	"gopkg.in/yaml.v2"
 )
 
 type CommandLineOptions struct {
-	modePtr           *string
 	debugPtr          *bool
 	awsWriteTagsPtr   *bool
-	awsCheckTagsPtr   *bool
 	accountsFilePtr   *string
 	taggedAccountsPtr *bool
 	monthPtr          *string
 	costTypePtr       *string
-	cookiePtr         *string
-	readcookiePtr     *bool
-	cookieDbPtr       *string
 	csvfilePtr        *string
 	reportFilePtr     *string
 	outputTypePtr     *string
@@ -148,17 +135,12 @@ func main() {
 	defaultReportFile := fmt.Sprintf("report-%s.txt", nowStr)
 	options := CommandLineOptions{
 		accountsFilePtr:   flag.String("accounts", "accounts.yaml", "file to read accounts list from"),
-		awsCheckTagsPtr:   flag.Bool("checktags", false, "checks all AWS accounts available for correct tag setting."),
 		awsWriteTagsPtr:   flag.Bool("awswritetags", false, "write tags to AWS accounts (USE WITH CARE!)"),
-		cookieDbPtr:       flag.String("cookiedb", getDefaultCookieStore(), `path to Chrome cookies database file, only for "cm" or "crosscheck" modes`),
-		cookiePtr:         flag.String("cookie", "", `access cookie for cost management system in curl serialized format, only for "cm" or "crosscheck" modes`),
-		costTypePtr:       flag.String("costtype", "UnblendedCost", `cost type to pull, only for "aws" or "crosscheck" modes, one of "AmortizedCost", "BlendedCost", "NetAmortizedCost", "NetUnblendedCost", "NormalizedUsageAmount", "UnblendedCost", or "UsageQuantity"`),
+		costTypePtr:       flag.String("costtype", "UnblendedCost", `cost type to pull, one of "AmortizedCost", "BlendedCost", "NetAmortizedCost", "NetUnblendedCost", "NormalizedUsageAmount", "UnblendedCost", or "UsageQuantity"`),
 		csvfilePtr:        flag.String("csv", defaultCsvFile, "output file for csv data"),
 		debugPtr:          flag.Bool("debug", false, "outputs debug info"),
-		modePtr:           flag.String("mode", "aws", `run mode, needs to be one of "aws", "cm" or "crosscheck"`),
-		monthPtr:          flag.String("month", defaultMonth, `context month in format yyyy-mm, only for "aws" or "crosscheck" modes`),
+		monthPtr:          flag.String("month", defaultMonth, `context month in format yyyy-mm`),
 		outputTypePtr:     flag.String("output", "gsheet", `output destination, needs to be one of "csv" or "gsheet"`),
-		readcookiePtr:     flag.Bool("readcookie", true, `reads the cookie from the Chrome cookies database, only for "cm" or "crosscheck" modes`),
 		reportFilePtr:     flag.String("report", defaultReportFile, "output file for data consistency report"),
 		taggedAccountsPtr: flag.Bool("taggedaccounts", false, "use the AWS tags as account list source"),
 	}
@@ -192,146 +174,42 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *options.awsCheckTagsPtr {
-		checkAwsTags(awsPuller)
-		os.Exit(0)
-	}
-
 	reportFile := getReportFile(options)
 	defer closeFile(reportFile)
 
 	awsAccounts, sortedAccountKeys := awsPuller.getAwsAccounts(accountsFile, options)
 
-	switch *options.modePtr {
-	case "aws":
-		var client *http.Client
-		var outfile *os.File
+	var client *http.Client
+	var outfile *os.File
 
-		refTime, err := time.Parse("2006-01", *options.monthPtr)
-		if err != nil {
-			log.Fatalf("[main] error parsing month value, %q: %v", *options.monthPtr, err)
-		}
+	refTime, err := time.Parse("2006-01", *options.monthPtr)
+	if err != nil {
+		log.Fatalf("[main] error parsing month value, %q: %v", *options.monthPtr, err)
+	}
 
-		if *options.outputTypePtr == "csv" {
-			outfile = getCsvFile(options)
-			defer closeFile(outfile)
-		} else if *options.outputTypePtr == "gsheet" {
-			oauthConfig := getMapKeyValue(accountsFile.Configuration, "oauth", "configuration")
-			client = getGoogleOAuthHttpClient(oauthConfig)
-		} else {
-			log.Fatalf("[main] Unexpected value for output type, %q", *options.outputTypePtr)
-		}
-
-		sheetData := awsPuller.pullAwsByAccount(awsAccounts, sortedAccountKeys, options, reportFile)
-
-		if *options.outputTypePtr == "csv" {
-			err = writeCsvFromSheet(outfile, sheetData)
-			if err != nil {
-				log.Fatalf("[main] error writing to output file: %v", err)
-			}
-		} else if *options.outputTypePtr == "gsheet" {
-			gsheetConfig := getMapKeyValue(accountsFile.Configuration, "gsheet", "base")
-			postToGSheet(sheetData, client, gsheetConfig, refTime)
-		}
-
-	case "cm":
-		var csvData [][]string
-		cookie, err := retrieveCookie(*options.cookiePtr, *options.readcookiePtr, *options.cookieDbPtr)
-		if err != nil {
-			log.Fatalf("[main] error retrieving cookie: %v", err)
-		}
-		outfile := getCsvFile(options)
+	if *options.outputTypePtr == "csv" {
+		outfile = getCsvFile(options)
 		defer closeFile(outfile)
-		cmPuller := NewCmPuller(cookie, *options.debugPtr)
-		for _, accountKey := range sortedAccountKeys {
-			group := accountKey
-			accountList := awsAccounts[accountKey]
-			for _, account := range accountList {
-				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)
-				csvData, _, err = pullCostManagement(*cmPuller, reportFile, account, csvData)
-				if err != nil {
-					log.Fatalf("[main] error pulling data: %v", err)
-				}
-			}
-		}
-		err = writeCsv(outfile, csvData)
+	} else if *options.outputTypePtr == "gsheet" {
+		oauthConfig := getMapKeyValue(accountsFile.Configuration, "oauth", "configuration")
+		client = getGoogleOAuthHttpClient(oauthConfig)
+	} else {
+		log.Fatalf("[main] Unexpected value for output type, %q", *options.outputTypePtr)
+	}
+
+	sheetData := awsPuller.pullAwsByAccount(awsAccounts, sortedAccountKeys, options, reportFile)
+
+	if *options.outputTypePtr == "csv" {
+		err = writeCsvFromSheet(outfile, sheetData)
 		if err != nil {
 			log.Fatalf("[main] error writing to output file: %v", err)
 		}
-	case "crosscheck":
-		var csvData [][]string
-		if *options.monthPtr == "" || *options.costTypePtr == "" {
-			log.Fatal("[main] aws mode requested, but no month and/or cost type given (use --month=yyyy-mm, --costtype=type)")
-		}
-		outfile := getCsvFile(options)
-		defer closeFile(outfile)
-		cookie, err := retrieveCookie(*options.cookiePtr, *options.readcookiePtr, *options.cookieDbPtr)
-		if err != nil {
-			log.Fatalf("[main] error retrieving cookie: %v", err)
-		}
-		cmPuller := NewCmPuller(cookie, *options.debugPtr)
-		for _, accountKey := range sortedAccountKeys {
-			group := accountKey
-			accountList := awsAccounts[accountKey]
-			for _, account := range accountList {
-				log.Printf("[main] pulling data for account %s (group %s)\n", account.AccountID, group)
-				var totalAws float64
-				_, totalAws, err = awsPuller.pullAwsAccount(
-					account,
-					group,
-					*options.monthPtr,
-					*options.costTypePtr,
-					reportFile,
-				)
-				if err != nil {
-					log.Fatalf("[main] error pulling data: %v", err)
-				}
-				var totalCM float64
-				csvData, totalCM, err = pullCostManagement(*cmPuller, reportFile, account, csvData)
-				if err != nil {
-					log.Fatalf("[main] error pulling data: %v", err)
-				}
-				// check if totals from AWS and CM are consistent
-				if math.Round(totalAws*100)/100 != math.Round(totalCM*100)/100 {
-					log.Printf(
-						"[main] error checking consistency of totals from AWS and CM for account %s: aws = %f; cm = %f",
-						account.AccountID,
-						totalAws,
-						totalCM,
-					)
-					writeReport(reportFile, fmt.Sprintf(
-						"%s: error checking consistency of totals from AWS and CM: aws = %f; cm = %f",
-						account.AccountID,
-						totalAws,
-						totalCM,
-					))
-				}
-			}
-		}
-		err = writeCsv(outfile, csvData)
-		if err != nil {
-			log.Fatalf("[main] error writing to output file: %v", err)
-		}
+	} else if *options.outputTypePtr == "gsheet" {
+		gsheetConfig := getMapKeyValue(accountsFile.Configuration, "gsheet", "base")
+		postToGSheet(sheetData, client, gsheetConfig, refTime)
 	}
 
 	log.Println("[main] operation done")
-}
-
-// getDefaultCookieStore encapsulates the platform-specific location of the
-// default browser cookie database file.
-//
-// TODO:  kooky.FindAllCookieStores() can handle this for us.
-func getDefaultCookieStore() string {
-	defaultCookieDb, _ := os.UserConfigDir()
-	if runtime.GOOS == "linux" {
-		defaultCookieDb = filepath.Join(defaultCookieDb, "google-chrome")
-	} else if runtime.GOOS == "darwin" {
-		defaultCookieDb = filepath.Join(defaultCookieDb, "Google/Chrome")
-	} else {
-		log.Printf("[main] unexpected platform:  %q\n", runtime.GOOS)
-	}
-	defaultCookieDb = filepath.Join(defaultCookieDb, "Default/Cookies")
-	return defaultCookieDb
 }
 
 func (a *AwsPuller) getAwsAccounts(
@@ -361,7 +239,7 @@ func (a *AwsPuller) pullAwsByAccount(
 	reportFile *os.File,
 ) (sheetData []*sheets.RowData) {
 	if *options.monthPtr == "" || *options.costTypePtr == "" {
-		log.Fatal("[pullAwsByAccount] aws mode requested, but no month and/or cost type given (use --month=yyyy-mm, --costtype=type)")
+		log.Fatal("[pullAwsByAccount] missing month or cost type (use --month=yyyy-mm, --costtype=type)")
 	}
 	for _, group := range sortedAccountKeys {
 		accountList := accounts[group]
@@ -398,14 +276,6 @@ func writeAwsTags(awsPuller *AwsPuller, options CommandLineOptions) {
 	}
 }
 
-func checkAwsTags(awsPuller *AwsPuller) {
-	log.Println("[checkAwsTags] checking tags on AWS")
-	_, err := getAccountSetsFromAws(awsPuller)
-	if err != nil {
-		log.Fatalf("[checkAwsTags] error getting accounts list: %v", err)
-	}
-}
-
 func getCsvFile(options CommandLineOptions) *os.File {
 	outfile, err := os.Create(*options.csvfilePtr)
 	if err != nil {
@@ -433,34 +303,6 @@ func sortedKeys(m map[string][]AccountEntry) []string {
 	return keys
 }
 
-func retrieveCookie(cookie string, readCookie bool, cookieDbFile string) (map[string]string, error) {
-	if cookie != "" {
-		// cookie is given on the cli in CURL format
-		log.Println("[retrieveCookie] retrieving cookies from cli")
-		return deserializeCurlCookie(cookie)
-	} else if readCookie {
-		// cookie is to be read from Chrome's cookie database
-		log.Println("[retrieveCookie] retrieving cookies from Chrome database")
-		// wait for user to login
-		fmt.Print("ACTION REQUIRED: please login to https://cloud.redhat.com/beta/cost-management/aws using your Chrome browser. Hit Enter when done.")
-		scanner := bufio.NewScanner(os.Stdin)
-		scanner.Scan()
-		fmt.Println("Thanks! Now retrieving cookies from Chrome..")
-		crhCookies, err := chrome.ReadCookies(cookieDbFile, kooky.Domain("cloud.redhat.com"))
-		if err != nil {
-			log.Fatalf("[retrieveCookie] error reading cookies from Chrome database: %v", err)
-			return nil, err
-		}
-		rhCookies, err := chrome.ReadCookies(cookieDbFile, kooky.DomainHasSuffix(".redhat.com"))
-		if err != nil {
-			log.Fatalf("[retrieveCookie] error reading cookies from Chrome database: %v", err)
-			return nil, err
-		}
-		return deserializeChromeCookie(append(crhCookies, rhCookies...))
-	}
-	return nil, errors.New("[retrieveCookie] either --readcookie or --cookie=<cookie> needs to be given")
-}
-
 func (a *AwsPuller) pullAwsAccount(
 	account AccountEntry,
 	group string,
@@ -486,78 +328,6 @@ func (a *AwsPuller) pullAwsAccount(
 		log.Fatalf("[pullAwsAccount] error normalizing data from AWS for account %s: %v", account.AccountID, err)
 	}
 	return
-}
-
-func pullCostManagement(
-	cmPuller CmPuller,
-	reportFile *os.File,
-	account AccountEntry,
-	csvData [][]string,
-) ([][]string, float64, error) {
-	log.Printf("[pullCostManagement] pulling cost management data for account %s", account.AccountID)
-	result, err := cmPuller.PullData(account.AccountID)
-	if err != nil {
-		log.Fatalf("[pullCostManagement] error pulling data from service: %v", err)
-		return csvData, 0, err
-	}
-	parsed, err := cmPuller.ParseResponse(result)
-	if err != nil {
-		log.Fatalf("[pullCostManagement] error parsing data from service: %v", err)
-		return csvData, 0, err
-	}
-	total, err := cmPuller.CheckResponseConsistency(account, parsed)
-	if err != nil {
-		log.Printf(
-			"[pullCostManagement] error checking consistency of response for account data %s: %v",
-			account.AccountID,
-			err,
-		)
-		writeReport(reportFile, account.AccountID+" (CM): "+err.Error())
-	} else {
-		log.Printf("[pullCostManagement] successful consistency check for data on account %s\n", account.AccountID)
-	}
-	normalized, err := cmPuller.NormalizeResponse(parsed)
-	if err != nil {
-		log.Fatalf("[pullCostManagement] error normalizing data from service: %v", err)
-		return csvData, 0, err
-	}
-	log.Printf("[pullCostManagement] appended data for account %s\n", account.AccountID)
-	csvData = append(csvData, normalized)
-	return csvData, total, nil
-}
-
-func deserializeCurlCookie(curlCookie string) (map[string]string, error) {
-	deserialized := make(map[string]string)
-	cookieElements := strings.Split(curlCookie, "; ")
-	for _, cookieStr := range cookieElements {
-		keyValue := strings.Split(cookieStr, "=")
-		if len(keyValue) < 2 {
-			return nil, errors.New("[deserializeCurlCookie] cookie not in correct format")
-		}
-		deserialized[keyValue[0]] = keyValue[1]
-	}
-	return deserialized, nil
-}
-
-func deserializeChromeCookie(chromeCookies []*kooky.Cookie) (map[string]string, error) {
-	deserialized := make(map[string]string)
-	for _, cookie := range chromeCookies {
-		deserialized[cookie.Name] = cookie.Value
-	}
-	return deserialized, nil
-}
-
-func writeCsv(outfile *os.File, data [][]string) error {
-	writer := csv.NewWriter(outfile)
-	defer writer.Flush()
-	for _, value := range data {
-		err := writer.Write(value)
-		if err != nil {
-			log.Printf("[writeCsv] error writing csv data to file: %v ", err)
-			return err
-		}
-	}
-	return nil
 }
 
 func writeCsvFromSheet(outfile *os.File, data []*sheets.RowData) error {
