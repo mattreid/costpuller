@@ -179,37 +179,67 @@ func main() {
 
 	awsAccounts, sortedAccountKeys := awsPuller.getAwsAccounts(accountsFile, options)
 
-	var client *http.Client
-	var outfile *os.File
+	output := newOutputObject(options, accountsFile)
+	defer output.close()
 
+	sheetData := awsPuller.pullAwsByAccount(awsAccounts, sortedAccountKeys, options, reportFile)
+
+	output.writeSheet(sheetData)
+
+	log.Println("[main] operation done")
+}
+
+// OutputObject encapsulates the destination for the output, hiding the details
+// of whether it goes to a local CSV file or a Google sheet (or both).
+type OutputObject struct {
+	csvFile      *os.File
+	httpClient   *http.Client
+	gsheetConfig map[string]string
+	refTime      time.Time
+}
+
+func newOutputObject(options CommandLineOptions, accountsFile AccountsFile) *OutputObject {
 	refTime, err := time.Parse("2006-01", *options.monthPtr)
 	if err != nil {
 		log.Fatalf("[main] error parsing month value, %q: %v", *options.monthPtr, err)
 	}
 
+	obj := &OutputObject{refTime: refTime}
+
 	if *options.outputTypePtr == "csv" {
-		outfile = getCsvFile(options)
-		defer closeFile(outfile)
+		obj.csvFile = getCsvFile(options)
 	} else if *options.outputTypePtr == "gsheet" {
 		oauthConfig := getMapKeyValue(accountsFile.Configuration, "oauth", "configuration")
-		client = getGoogleOAuthHttpClient(oauthConfig)
+		obj.httpClient = getGoogleOAuthHttpClient(oauthConfig)
+		obj.gsheetConfig = getMapKeyValue(accountsFile.Configuration, "gsheet", "base")
 	} else {
 		log.Fatalf("[main] Unexpected value for output type, %q", *options.outputTypePtr)
 	}
+	return obj
+}
 
-	sheetData := awsPuller.pullAwsByAccount(awsAccounts, sortedAccountKeys, options, reportFile)
-
-	if *options.outputTypePtr == "csv" {
-		err = writeCsvFromSheet(outfile, sheetData)
+func (o *OutputObject) writeSheet(sheetData []*sheets.RowData) {
+	if o.csvFile != nil {
+		err := writeCsvFromSheet(o.csvFile, sheetData)
 		if err != nil {
 			log.Fatalf("[main] error writing to output file: %v", err)
 		}
-	} else if *options.outputTypePtr == "gsheet" {
-		gsheetConfig := getMapKeyValue(accountsFile.Configuration, "gsheet", "base")
-		postToGSheet(sheetData, client, gsheetConfig, refTime)
 	}
+	if o.httpClient != nil {
+		postToGSheet(sheetData, o.httpClient, o.gsheetConfig, o.refTime)
+	}
+}
 
-	log.Println("[main] operation done")
+func (o *OutputObject) close() {
+	if o.csvFile != nil {
+		err := o.csvFile.Close()
+		if err != nil {
+			log.Printf("Ignoring error closing csv file: %v", err)
+		}
+	}
+	if o.httpClient != nil {
+		o.httpClient.CloseIdleConnections()
+	}
 }
 
 func (a *AwsPuller) getAwsAccounts(
