@@ -92,7 +92,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"google.golang.org/api/sheets/v4"
@@ -156,33 +158,46 @@ func main() {
 	if len(accountsFile.Providers) == 0 {
 		log.Fatalf("[main] error in accounts file: empty or missing \"cloud_providers\" section")
 	}
-
-	awsConfig := getMapKeyValue(accountsFile.Configuration, "aws", "configuration")
-	awsProfile := awsConfig["profile"]
-	if awsProfile == "" {
-		awsProfile = "default"
-		log.Printf(
-			"[main] no \"profile\" key found in the \"aws\" section of the configuration file; "+
-				"using AWS credentials profile %q",
-			awsProfile,
-		)
-	}
-	awsPuller := NewAwsPuller(awsProfile, *options.debugPtr)
-
-	if *options.awsWriteTagsPtr {
-		writeAwsTags(awsPuller, options)
-		os.Exit(0)
-	}
-
-	reportFile := getReportFile(options)
-	defer closeFile(reportFile)
-
-	awsAccounts, sortedAccountKeys := awsPuller.getAwsAccounts(accountsFile, options)
+	accountMetadata := getAccountMetadata(accountsFile.Providers)
 
 	output := newOutputObject(options, accountsFile)
 	defer output.close()
 
-	sheetData := awsPuller.pullAwsByAccount(awsAccounts, sortedAccountKeys, options, reportFile)
+	var sheetData []*sheets.RowData
+
+	cldy, useCldyData := accountsFile.Configuration["cloudability"]
+	if *options.awsWriteTagsPtr || !useCldyData {
+		awsConfig := getMapKeyValue(accountsFile.Configuration, "aws", "configuration")
+		awsProfile := awsConfig["profile"]
+		if awsProfile == "" {
+			awsProfile = "default"
+			log.Printf(
+				"[main] no \"profile\" key found in the \"aws\" section of the configuration file; "+
+					"using AWS credentials profile %q",
+				awsProfile,
+			)
+		}
+		awsPuller := NewAwsPuller(awsProfile, *options.debugPtr)
+
+		if *options.awsWriteTagsPtr {
+			writeAwsTags(awsPuller, options)
+			os.Exit(0)
+		}
+
+		reportFile := getReportFile(options)
+		defer closeFile(reportFile)
+
+		awsAccounts, sortedAccountKeys := awsPuller.getAwsAccounts(accountsFile, options)
+
+		sheetData = awsPuller.pullAwsByAccount(awsAccounts, sortedAccountKeys, options, reportFile)
+	} else {
+		cldyCostData := getCloudabilityData(cldy, options)
+		if cldyCostData == nil || cldyCostData.TotalResults == 0 || len(cldyCostData.Results) == 0 {
+			log.Fatalf("[main] no Cloudability data")
+		}
+
+		sheetData = getSheetFromCloudability(cldyCostData, accountMetadata)
+	}
 
 	output.writeSheet(sheetData)
 
@@ -369,6 +384,8 @@ func writeCsvFromSheet(outfile *os.File, data []*sheets.RowData) error {
 			var cellData string
 			if cell.UserEnteredValue.StringValue != nil {
 				cellData = *cell.UserEnteredValue.StringValue
+			} else if cell.UserEnteredValue.FormulaValue != nil {
+				cellData = *cell.UserEnteredValue.FormulaValue
 			} else if cell.UserEnteredValue.NumberValue != nil {
 				cellData = fmt.Sprintf("%f", *cell.UserEnteredValue.NumberValue)
 			} else {
@@ -451,6 +468,63 @@ func getAccountSetsFromAws(awsPuller *AwsPuller) (map[string][]AccountEntry, err
 		}
 	}
 	return accounts, nil
+}
+
+// AccountMetadata is an object which encapsulates the information from the
+// accounts YAML file which is associated with a given account.
+type AccountMetadata struct {
+	Category      string
+	CloudProvider string
+	DataFound     bool
+	Description   string
+	Group         string
+}
+
+var accountIdPatterns = map[string]*regexp.Regexp{
+	"Amazon": regexp.MustCompile(`^([0-9]{4})-?([0-9]{4})-?([0-9]{4})$`),                                         // e.g., "5901-8385-7305"
+	"Azure":  regexp.MustCompile(`^([0-9a-f]{8})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{12})$`), // e.g., "b0ad4737-8299-4c0a-9dd5-959cbcf8d81c"
+}
+
+// getAccountMetadata takes the hierarchy from the accounts YAML file and
+// inverts it, so that, given an account ID, we can find the cloud provider
+// and group that the account is associated with.
+func getAccountMetadata(providers map[string]map[string][]AccountEntry) (metadata map[string]*AccountMetadata) {
+	metadata = make(map[string]*AccountMetadata)
+	for provider, groups := range providers {
+		if provider == "aws" { // Convert for historical compatibility
+			provider = "Amazon"
+		}
+		for group, groupEntries := range groups {
+			for _, entry := range groupEntries {
+				// Use the account ID as the key to the map.  Amazon and Azure
+				// use IDs with a fixed format -- check that the ID from the
+				// accounts file matches the format.  For historical
+				// compatibility, we accept IDs which contain no hyphens, but
+				// we add the hyphens to match the format that Cloudability uses.
+				var key string
+				translate, exists := accountIdPatterns[provider]
+				if exists {
+					if matches := translate.FindStringSubmatch(entry.AccountID); matches != nil {
+						key = strings.Join(matches[1:], "-")
+					} else {
+						log.Fatalf("[getAccountMetadata] unrecognized account id format, %q, must match %q",
+							entry.AccountID, translate.String())
+					}
+				} else {
+					key = entry.AccountID
+				}
+				metadata[key] = &AccountMetadata{
+					Category:      entry.Category,
+					CloudProvider: provider,
+					DataFound:     false, // Will be set when cost data is found
+					Description:   entry.Description,
+					Group:         group,
+				}
+			}
+		}
+	}
+
+	return
 }
 
 // closeFile is a helper function which allows closing a file to be deferred
