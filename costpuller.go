@@ -324,7 +324,7 @@ func getReportFile(options CommandLineOptions) *os.File {
 	return reportFile
 }
 
-func sortedKeys(m map[string][]AccountEntry) []string {
+func sortedKeys[T any](m map[string]T) []string {
 	var keys []string
 	for k := range m {
 		keys = append(keys, k)
@@ -462,11 +462,7 @@ func closeFile(filename *os.File) {
 // getMapKeyValue is a generic helper function which fetches a value from the
 // given key in the given map; if the key is not in the map, the program exits
 // with an error citing the supplied section string.
-func getMapKeyValue[V any](
-	configMap map[string]V,
-	key string,
-	section string,
-) (value V) {
+func getMapKeyValue[V any](configMap map[string]V, key string, section string) (value V) {
 	if value, ok := configMap[key]; ok {
 		return value
 	}
