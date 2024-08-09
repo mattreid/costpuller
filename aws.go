@@ -395,11 +395,3 @@ func (a *AwsPuller) WriteAwsTags(accounts map[string][]AccountEntry) error {
 	}
 	return nil
 }
-
-func newStringCell(val string) *sheets.CellData {
-	return &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &val}}
-}
-
-func newNumberCell(val float64) *sheets.CellData {
-	return &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{NumberValue: &val}}
-}

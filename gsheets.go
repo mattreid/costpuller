@@ -218,3 +218,19 @@ func getSheetIDFromName(sheetObject *sheets.Spreadsheet, sheetName string) (int6
 	}
 	return -1, -1
 }
+
+func newStringCell(val string) *sheets.CellData {
+	return &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{StringValue: &val}}
+}
+
+func newNumberCell(val float64) *sheets.CellData {
+	return &sheets.CellData{UserEnteredValue: &sheets.ExtendedValue{NumberValue: &val}}
+}
+
+func newFormulaCell(formula string) *sheets.CellData {
+	return &sheets.CellData{
+		UserEnteredValue: &sheets.ExtendedValue{
+			FormulaValue: &formula,
+		},
+	}
+}
