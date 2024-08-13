@@ -473,6 +473,7 @@ func getAccountSetsFromAws(awsPuller *AwsPuller) (map[string][]AccountEntry, err
 // AccountMetadata is an object which encapsulates the information from the
 // accounts YAML file which is associated with a given account.
 type AccountMetadata struct {
+	AccountId     string
 	Category      string
 	CloudProvider string
 	DataFound     bool
@@ -514,6 +515,7 @@ func getAccountMetadata(providers map[string]map[string][]AccountEntry) (metadat
 					key = entry.AccountID
 				}
 				metadata[key] = &AccountMetadata{
+					AccountId:     entry.AccountID,
 					Category:      entry.Category,
 					CloudProvider: provider,
 					DataFound:     false, // Will be set when cost data is found

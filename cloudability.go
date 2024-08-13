@@ -192,7 +192,7 @@ func getSheetFromCloudability(
 	metadata := make(map[string]cldyAccountMetadata)
 	ignored := make(map[string]struct{}) // Suppress multiple warnings
 	for _, entry := range cldy.Results {
-		// Keep track of which accounts we find and warn about finding ones
+		// Keep track of which accounts we find, and warn about finding ones
 		// which we're not looking for.
 		if _, exists := accountsMetadata[entry.AccountID]; exists {
 			if accountsMetadata[entry.AccountID].CloudProvider != entry.CloudProvider &&
@@ -272,9 +272,14 @@ func getSheetFromCloudability(
 		}
 	}
 
-	// Build a list of column headers, starting with a fixed set of strings
-	// for metadata and ending with the headers collected from the data.
-	columnHeadsList := []string{"TOTAL", "Team", "Date", "Cloud Provider", "Payer ID", "Account ID", "Account Name"}
+	// Build a list of column headers, starting with a fixed set of strings for
+	// metadata and ending with the headers collected from the data.
+	//
+	// Note:  The "Account ID" column will be used as the key for lookups, so
+	// it must appear before any values (such as the totals) which will be
+	// looked up.
+	columnHeadsList := []string{"Team", "Date", "Cloud Provider", "Payer ID",
+		"Account Name", "Account ID", "TOTAL"}
 	fixed := len(columnHeadsList)
 	columnHeadsList = append(columnHeadsList, sortedKeys(columnHeadsSet)...)
 
@@ -293,20 +298,20 @@ func getSheetFromCloudability(
 		sheetRow = make([]*sheets.CellData, len(columnHeadsList))
 		for idx, key := range columnHeadsList {
 			var val *sheets.CellData
-			switch idx {
-			case 0: // "TOTAL"
+			switch {
+			case key == "TOTAL":
 				val = newFormulaCell(getTotalsFormula(len(output), fixed, len(columnHeadsList)))
-			case 1: // "Team"
+			case key == "Team":
 				val = newStringCell(accountsMetadata[accountId].Group)
-			case 2: // "Date"
+			case key == "Date":
 				val = newStringCell(cldy.Meta.Dates.Start.Format("2006-01"))
-			case 3: // "Cloud Provider"
+			case key == "Cloud Provider":
 				val = newStringCell(accountsMetadata[accountId].CloudProvider)
-			case 4: // "Payer ID"
+			case key == "Payer ID":
 				val = newStringCell(metadata[accountId].PayerAccountId)
-			case 5: // "Account ID"
-				val = newStringCell(accountId)
-			case 6: // "Account Name"
+			case key == "Account ID": // Use the ID from the YAML file, not from Cloudability
+				val = newStringCell(accountsMetadata[accountId].AccountId)
+			case key == "Account Name":
 				val = newStringCell(metadata[accountId].AccountName)
 			default:
 				val = newNumberCell(dataRow[key])
