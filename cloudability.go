@@ -30,6 +30,7 @@ type ResultsEntry struct {
 	AccountName    string `json:"vendor_account_name"`
 	CloudProvider  string `json:"vendor"`
 	Cost           string `json:"unblended_cost"`
+	CostCenter     string `json:"category4"`
 	PayerAccountId string `json:"account_identifier"`
 	UsageFamily    string `json:"usage_family"`
 }
@@ -103,10 +104,15 @@ func getCloudabilityData(configMap map[string]string, options CommandLineOptions
 	qParams := cUrl.Query()
 	qParams.Set("start_date", startTime)
 	qParams.Set("end_date", endTime)
-	qParams.Set("dimensions", "vendor,account_identifier,vendor_account_name,vendor_account_identifier,usage_family")
+	qParams.Set("dimensions", "vendor,category4,account_identifier,vendor_account_name,vendor_account_identifier,usage_family")
 	qParams.Set("metrics", costType)
 	qParams.Set("filters", "category4==726")
-	qParams.Add("filters", "unblended_cost>0")
+	qParams.Add("filters", "category4==670")
+	qParams.Add("filters", "category4==706")
+	qParams.Add("filters", "account_identifier==3292-6082-0478")
+	qParams.Add("filters", "account_identifier==016D43-3EB7A0-06F114")
+	qParams.Add("filters", "account_identifier==0bb6ecf2-fbd9-5c37-7caf-3fe4119b75e0")
+	//qParams.Add("filters", "unblended_cost>0")
 	qParams.Set("view_id", "0")
 	qParams.Set("limit", "0")
 	path, err := url.JoinPath(cUrl.Path, uri)
@@ -173,15 +179,6 @@ func getSheetFromCloudability(
 	cldy *CloudabilityCostData,
 	accountsMetadata map[string]*AccountMetadata,
 ) (output []*sheets.RowData) {
-	// Fetch the Cost Center value from the filter metadata; this saves us from
-	// having to add another dimension to the results, given that they would
-	// all have the same value.  Sanity check that we've got the right filter.
-	costCenter := cldy.Meta.Filters[0].Value
-	if cldy.Meta.Filters[0].Label != "Cost Center" {
-		log.Printf("Unexpected filter 0:  found %q when expecting %q",
-			cldy.Meta.Filters[0].Label, "Cost Center")
-	}
-
 	// Build a two-dimensional map in which the first key is the account ID,
 	// the second key is the usage family, and the value is the corresponding
 	// cost -- this amounts to a sparse sheet grid.  While we're at it, collect
@@ -212,7 +209,7 @@ func getSheetFromCloudability(
 			if _, exists := ignored[entry.AccountID]; !exists {
 				log.Printf(
 					"Found account which is not in the accounts file:  Cloudability:%s:%s:%s (%s); ignoring",
-					costCenter, entry.CloudProvider, entry.AccountID, entry.AccountName,
+					entry.CostCenter, entry.CloudProvider, entry.AccountID, entry.AccountName,
 				)
 				ignored[entry.AccountID] = struct{}{}
 			}
@@ -227,7 +224,7 @@ func getSheetFromCloudability(
 			metadata[entry.AccountID] = cldyAccountMetadata{
 				AccountName:    entry.AccountName,
 				CloudProvider:  entry.CloudProvider,
-				CostCenter:     costCenter,
+				CostCenter:     entry.CostCenter,
 				PayerAccountId: entry.PayerAccountId,
 			}
 		}
