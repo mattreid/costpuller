@@ -17,7 +17,7 @@ import (
 // The new sheet name is constructed based on the reference time passed in the
 // last parameter.  Details such as the spreadsheet ID and sheet names are found
 // in the configuration map.
-func postToGSheet(sheetData []*sheets.RowData, client *http.Client, configMap map[string]string, ref time.Time) {
+func postToGSheet(sheetData []*sheets.RowData, client *http.Client, configMap Configuration, ref time.Time) {
 	srv, err := sheets.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
 		log.Fatalf("Unable to create Google Sheets client: %v", err)
@@ -30,9 +30,9 @@ func postToGSheet(sheetData []*sheets.RowData, client *http.Client, configMap ma
 	// value while non-digits are copied literally, so, if the template-name is
 	// "Raw Data 01/2006" and the reference time is in August 2024, the result
 	// will be "Raw Data 08/2024".
-	newSheetName := ref.Format(getMapKeyValue(configMap, "sheetNameTemplate", "gsheet"))
+	newSheetName := ref.Format(getMapKeyString(configMap, "sheetNameTemplate", "gsheet"))
 
-	spreadsheetId := getMapKeyValue(configMap, "spreadsheetId", "gsheet")
+	spreadsheetId := getMapKeyString(configMap, "spreadsheetId", "gsheet")
 	log.Println("Fetching Spreadsheet information")
 	sheetObject, err := srv.Spreadsheets.
 		Get(spreadsheetId).
@@ -44,7 +44,7 @@ func postToGSheet(sheetData []*sheets.RowData, client *http.Client, configMap ma
 
 	newDataRef := getUpdateLocation(srv, sheetObject, newSheetName, len(sheetData[0].Values), len(sheetData))
 
-	mainSheetName := getMapKeyValue(configMap, "mainSheetName", "gsheet")
+	mainSheetName := getMapKeyString(configMap, "mainSheetName", "gsheet")
 	mainSheetProperties := getSheetIdFromName(sheetObject, mainSheetName)
 	if mainSheetProperties == nil {
 		log.Fatalf("Error updating spreadsheet sheet: main sheet %q not found", mainSheetName)

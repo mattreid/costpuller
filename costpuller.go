@@ -114,9 +114,12 @@ type CommandLineOptions struct {
 }
 
 type AccountsFile struct {
-	Configuration map[string]map[string]string         `yaml:"configuration"`
-	Providers     map[string]map[string][]AccountEntry `yaml:"cloud_providers"`
+	Configuration map[string]Configuration `yaml:"configuration"`
+	Providers     map[string]Team          `yaml:"cloud_providers"`
 }
+
+type Configuration map[string]any
+type Team map[string][]AccountEntry
 
 // AccountEntry describes an account with metadata.
 type AccountEntry struct {
@@ -168,7 +171,7 @@ func main() {
 	cldy, useCldyData := accountsFile.Configuration["cloudability"]
 	if *options.awsWriteTagsPtr || !useCldyData {
 		awsConfig := getMapKeyValue(accountsFile.Configuration, "aws", "configuration")
-		awsProfile := awsConfig["profile"]
+		awsProfile := getMapKeyString(awsConfig, "profile", "")
 		if awsProfile == "" {
 			awsProfile = "default"
 			log.Printf(
@@ -209,7 +212,7 @@ func main() {
 type OutputObject struct {
 	csvFile      *os.File
 	httpClient   *http.Client
-	gsheetConfig map[string]string
+	gsheetConfig Configuration
 	refTime      time.Time
 }
 
@@ -415,8 +418,8 @@ func loadAccountsFile(accountsFileName string) (accountsFile AccountsFile, err e
 		return accountsFile, fmt.Errorf("[loadAccountsFile] error loading accounts file: %v", err)
 	}
 	accountsFile = AccountsFile{
-		Configuration: make(map[string]map[string]string),
-		Providers:     make(map[string]map[string][]AccountEntry),
+		Configuration: make(map[string]Configuration),
+		Providers:     make(map[string]Team),
 	}
 	err = yaml.Unmarshal(yamlFile, accountsFile)
 	if err != nil {
@@ -489,7 +492,7 @@ var accountIdPatterns = map[string]*regexp.Regexp{
 // getAccountMetadata takes the hierarchy from the accounts YAML file and
 // inverts it, so that, given an account ID, we can find the cloud provider
 // and group that the account is associated with.
-func getAccountMetadata(providers map[string]map[string][]AccountEntry) (metadata map[string]*AccountMetadata) {
+func getAccountMetadata(providers map[string]Team) (metadata map[string]*AccountMetadata) {
 	metadata = make(map[string]*AccountMetadata)
 	for provider, groups := range providers {
 		if provider == "aws" { // Convert for historical compatibility
@@ -536,12 +539,35 @@ func closeFile(filename *os.File) {
 }
 
 // getMapKeyValue is a generic helper function which fetches a value from the
-// given key in the given map; if the key is not in the map, the program exits
-// with an error citing the supplied section string.
+// given key in the given map; if the key is not in the map, and the caller has
+// provided the section name, the program exits with an error; otherwise, it
+// returns the "zero value".
 func getMapKeyValue[V any](configMap map[string]V, key string, section string) (value V) {
 	if value, ok := configMap[key]; ok {
 		return value
 	}
-	log.Fatalf("Key %q is missing from the %q section of the configuration", key, section)
+
+	if section != "" {
+		log.Fatalf("Key %q is missing from the %q section of the configuration", key, section)
+	}
+
+	return
+}
+
+// getMapKeyValue is a generic helper function which fetches a string from the
+// given key in the given map; if the key is not in the map or the value is not
+// a string, and the caller has provided the section name, the program exits
+// with an error; otherwise, it returns the "zero value".
+func getMapKeyString(configMap map[string]any, key string, section string) (value string) {
+	valueAny := getMapKeyValue(configMap, key, section)
+	if value, ok := valueAny.(string); ok {
+		return value
+	}
+
+	if section != "" {
+		log.Fatalf("%q key in the %q section of the configuration file must be a string; "+
+			"found %v, type %T", key, section, valueAny, valueAny)
+	}
+
 	return
 }

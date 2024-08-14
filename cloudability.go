@@ -80,10 +80,10 @@ type Element struct {
 }
 
 // FIXME:  how should we be filtering the data?  Currently, it's hard-wired for Cost Center 726....
-func getCloudabilityData(configMap map[string]string, options CommandLineOptions) *CloudabilityCostData {
+func getCloudabilityData(configMap Configuration, options CommandLineOptions) *CloudabilityCostData {
 	uri := "/v3/reporting/cost/run"
 
-	cUrl, err := url.Parse(configMap["api"])
+	cUrl, err := url.Parse(getMapKeyString(configMap, "api", "cloudability"))
 	if err != nil {
 		log.Fatalf("Error in Cloudability \"api_host\" value (%q): %v", configMap["api"], err)
 	}
@@ -131,7 +131,8 @@ func getCloudabilityData(configMap map[string]string, options CommandLineOptions
 	if err != nil {
 		log.Fatalf("Error creating Cloudability request:  %v", err)
 	}
-	request.SetBasicAuth(configMap["api_key"], "")
+	apiKey := getMapKeyString(configMap, "api_key", "cloudability")
+	request.SetBasicAuth(apiKey, "")
 	request.Header.Add("Accept", "application/json")
 
 	log.Println("[getCloudabilityData] Sending request")

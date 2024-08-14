@@ -38,7 +38,7 @@ const tokenFileName = "costpuller_token.json"
 // under "Credentials").  It is located using the default mechanisms (e.g., in
 // ${HOME}/.config/gcloud/application_default_credentials.json).  (Currently,
 // the scope of the authorization is limited to the Google Sheets APIs.)
-func getGoogleOAuthHttpClient(oauthConfigMap map[string]string) *http.Client {
+func getGoogleOAuthHttpClient(oauthConfigMap Configuration) *http.Client {
 	ctx := context.Background()
 
 	credObj, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/spreadsheets")
@@ -61,12 +61,13 @@ func getGoogleOAuthHttpClient(oauthConfigMap map[string]string) *http.Client {
 // the supplied mapping and returns either a cached token, if available, or a
 // new token.
 func getToken(
-	oauthConfigMap map[string]string,
+	oauthConfigMap Configuration,
 	config *oauth2.Config,
 	ctx context.Context,
 ) (token *oauth2.Token, tokenCachePath string) {
 	var tokenCacheFile *os.File
-	tokenCachePath, err := getCacheFileName(oauthConfigMap["tokenCachePath"])
+	path := getMapKeyString(oauthConfigMap, "tokenCachePath", "")
+	tokenCachePath, err := getCacheFileName(path)
 	if err == nil {
 		tokenCacheFile, err = os.Open(tokenCachePath)
 	}
@@ -74,7 +75,8 @@ func getToken(
 		token = getCachedToken(config, tokenCacheFile, ctx)
 		closeFile(tokenCacheFile)
 	} else if errors.Is(err, os.ErrNotExist) {
-		token = getNewToken(config, oauthConfigMap["port"], ctx)
+		port := getMapKeyString(oauthConfigMap, "port", "")
+		token = getNewToken(config, port, ctx)
 	} else {
 		log.Fatalf("Unexpected error accessing the token cache file, %q: %v", tokenCachePath, err)
 	}
