@@ -106,11 +106,11 @@ func loadNewData(
 	newSheetRef *sheets.GridRange,
 	mainSheetRef *sheets.GridRange,
 ) {
-	_, err := srv.Spreadsheets.BatchUpdate(spreadsheetId, &sheets.BatchUpdateSpreadsheetRequest{
+	response, err := srv.Spreadsheets.BatchUpdate(spreadsheetId, &sheets.BatchUpdateSpreadsheetRequest{
 		Requests: []*sheets.Request{
 			{
 				UpdateCells: &sheets.UpdateCellsRequest{
-					Fields: "userEnteredValue",
+					Fields: "userEnteredValue,userEnteredFormat",
 					Range:  newSheetRef,
 					Rows:   sheetData,
 				},
@@ -126,7 +126,25 @@ func loadNewData(
 		},
 	}).Do()
 	if err != nil {
-		log.Fatalf("Error updating sheet: %v", err)
+		log.Fatalf("Error updating sheet: %v, [%v]", err, response)
+	}
+	// Auto-resizing the columns doesn't work well until after the data has
+	// been updated (and, even then, it seems about 10% too narrow on my
+	// screen), so this needs to be done in a separate request.
+	response, err = srv.Spreadsheets.BatchUpdate(spreadsheetId, &sheets.BatchUpdateSpreadsheetRequest{
+		Requests: []*sheets.Request{
+			{
+				AutoResizeDimensions: &sheets.AutoResizeDimensionsRequest{
+					Dimensions: &sheets.DimensionRange{
+						Dimension: "COLUMNS",
+						SheetId:   newSheetRef.SheetId,
+					},
+				},
+			},
+		},
+	}).Do()
+	if err != nil {
+		log.Fatalf("Error updating column widths again: %v, [%v]", err, response)
 	}
 }
 

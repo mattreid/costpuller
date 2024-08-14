@@ -287,6 +287,17 @@ func getSheetFromCloudability(
 	sheetRow := make([]*sheets.CellData, len(columnHeadsList))
 	for idx, header := range columnHeadsList {
 		sheetRow[idx] = newStringCell(header)
+		sheetRow[idx].UserEnteredFormat = &sheets.CellFormat{
+			BackgroundColorStyle: &sheets.ColorStyle{
+				RgbColor: &sheets.Color{
+					Blue:  204.0 / 256.0,
+					Green: 204.0 / 256.0,
+					Red:   204.0 / 256.0,
+				},
+			},
+			HorizontalAlignment: "CENTER",
+			TextFormat:          &sheets.TextFormat{Bold: true},
+		}
 	}
 	output = append(output, &sheets.RowData{Values: sheetRow})
 
@@ -301,6 +312,15 @@ func getSheetFromCloudability(
 			switch {
 			case key == "TOTAL":
 				val = newFormulaCell(getTotalsFormula(len(output), fixed, len(columnHeadsList)))
+				val.UserEnteredFormat = &sheets.CellFormat{
+					BackgroundColorStyle: &sheets.ColorStyle{
+						RgbColor: &sheets.Color{
+							Blue:  239.0 / 256.0,
+							Green: 239.0 / 256.0,
+							Red:   239.0 / 256.0,
+						},
+					},
+				}
 			case key == "Team":
 				val = newStringCell(accountsMetadata[accountId].Group)
 			case key == "Date":
@@ -315,12 +335,20 @@ func getSheetFromCloudability(
 				val = newStringCell(metadata[accountId].AccountName)
 			default:
 				val = newNumberCell(dataRow[key])
+				val.UserEnteredFormat = &sheets.CellFormat{
+					NumberFormat: &sheets.NumberFormat{
+						//Pattern: "",
+						Type: "CURRENCY",
+					},
+				}
 			}
 			sheetRow[idx] = val
 		}
 		output = append(output, &sheets.RowData{Values: sheetRow})
 	}
 
+	// FIXME:  We should sort the sheet (somehow) so that it produces more
+	//  deterministic results.
 	return
 }
 
