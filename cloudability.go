@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"google.golang.org/api/sheets/v4"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -345,9 +347,22 @@ func getSheetFromCloudability(
 		output = append(output, &sheets.RowData{Values: sheetRow})
 	}
 
-	// FIXME:  We should sort the sheet (somehow) so that it produces more
-	//  deterministic results.
+	sortOutput(output[1:], slices.Index(columnHeadsList, "Account ID"))
+	sortOutput(output[1:], slices.Index(columnHeadsList, "Cloud Provider"))
+	sortOutput(output[1:], slices.Index(columnHeadsList, "Team"))
+
 	return
+}
+
+// sortOutput sorts the rows of the provided sheet according to the indicated
+// column.  Uses a stable sort so that we can retain the ordering from previous
+// sorts for entries with equal values in the current sort.
+func sortOutput(output []*sheets.RowData, columnIndex int) {
+	slices.SortStableFunc(output, func(a, b *sheets.RowData) int {
+		return cmp.Compare(
+			*a.Values[columnIndex].UserEnteredValue.StringValue,
+			*b.Values[columnIndex].UserEnteredValue.StringValue)
+	})
 }
 
 // getTotalsFormula is a helper function which constructs a formula for
