@@ -81,7 +81,6 @@ type Element struct {
 	//Type string `json:"type"`
 }
 
-// FIXME:  how should we be filtering the data?  Currently, it's hard-wired for Cost Center 726....
 func getCloudabilityData(configMap Configuration, options CommandLineOptions) *CloudabilityCostData {
 	uri := "/v3/reporting/cost/run"
 
@@ -108,12 +107,30 @@ func getCloudabilityData(configMap Configuration, options CommandLineOptions) *C
 	qParams.Set("end_date", endTime)
 	qParams.Set("dimensions", "vendor,category4,account_identifier,vendor_account_name,vendor_account_identifier,usage_family")
 	qParams.Set("metrics", costType)
-	qParams.Set("filters", "category4==726")
-	qParams.Add("filters", "category4==670")
-	qParams.Add("filters", "category4==706")
-	qParams.Add("filters", "account_identifier==3292-6082-0478")
-	qParams.Add("filters", "account_identifier==016D43-3EB7A0-06F114")
-	qParams.Add("filters", "account_identifier==0bb6ecf2-fbd9-5c37-7caf-3fe4119b75e0")
+	filtersAny := getMapKeyValue(configMap, "filters", "")
+	if filters, ok := filtersAny.(map[any]any); ok {
+		for filterAny, expAny := range filters {
+			filter := getStringFromAny(filterAny, "Cloudability filter name")
+			if expAny == nil {
+				log.Fatalf("Missing value(s) for Cloudability filter %q", filter)
+			}
+			exp, ok := expAny.([]any)
+			if !ok {
+				log.Fatalf(
+					"Unexpected value (%v) for Cloudability filter values for filter %q, expected an array of strings",
+					expAny,
+					filter,
+				)
+			}
+			for _, valAny := range exp {
+				val := getStringFromAny(valAny, "Cloudability filter value")
+				qParams.Add("filters", filter+"=="+val)
+			}
+		}
+	} else if filtersAny != nil {
+		log.Fatalf("Error in Cloudability \"filters\" value (%q), type is %T, expected a mapping",
+			filtersAny, filtersAny)
+	}
 	//qParams.Add("filters", "unblended_cost>0")
 	qParams.Set("view_id", "0")
 	qParams.Set("limit", "0")
@@ -211,7 +228,7 @@ func getSheetFromCloudability(
 		} else {
 			if _, exists := ignored[entry.AccountID]; !exists {
 				log.Printf(
-					"Found account which is not in the accounts file:  Cloudability:%s:%s:%s (%s); ignoring",
+					"Info:  found account which is not in the accounts file:  Cloudability:%s:%s:%s (%s); ignoring",
 					entry.CostCenter, entry.CloudProvider, entry.AccountID, entry.AccountName,
 				)
 				ignored[entry.AccountID] = struct{}{}

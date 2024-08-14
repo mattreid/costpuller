@@ -229,7 +229,7 @@ func newOutputObject(options CommandLineOptions, accountsFile AccountsFile) *Out
 	} else if *options.outputTypePtr == "gsheet" {
 		oauthConfig := getMapKeyValue(accountsFile.Configuration, "oauth", "configuration")
 		obj.httpClient = getGoogleOAuthHttpClient(oauthConfig)
-		obj.gsheetConfig = getMapKeyValue(accountsFile.Configuration, "gsheet", "base")
+		obj.gsheetConfig = getMapKeyValue(accountsFile.Configuration, "gsheet", "configuration")
 	} else {
 		log.Fatalf("[main] Unexpected value for output type, %q", *options.outputTypePtr)
 	}
@@ -548,7 +548,7 @@ func getMapKeyValue[V any](configMap map[string]V, key string, section string) (
 	}
 
 	if section != "" {
-		log.Fatalf("Key %q is missing from the %q section of the configuration", key, section)
+		log.Fatalf("Key %q is missing from the %q section of the configuration file", key, section)
 	}
 
 	return
@@ -564,10 +564,24 @@ func getMapKeyString(configMap map[string]any, key string, section string) (valu
 		return value
 	}
 
-	if section != "" {
-		log.Fatalf("%q key in the %q section of the configuration file must be a string; "+
-			"found %v, type %T", key, section, valueAny, valueAny)
+	if valueAny != nil {
+		msg := "%q key in the "
+		if section != "" {
+			msg += fmt.Sprintf("%q section of the ", section)
+		}
+		log.Fatalf(msg+"configuration file must be a string; found %v, type %T",
+			key, valueAny, valueAny)
 	}
 
+	return
+}
+
+// getStringFromAny encapsulates and centralizes the operation of converting an
+// `any` value to a string and takes care of checking for and handling failures.
+func getStringFromAny(anyValue any, message string) (value string) {
+	value, ok := anyValue.(string)
+	if !ok && anyValue != nil {
+		log.Fatalf("Unexpected value (%v) for %s, expected a string", anyValue, message)
+	}
 	return
 }
