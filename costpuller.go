@@ -2,7 +2,8 @@
 //
 // This tool gathers billing data from various accounts on various cloud
 // providers.  Ultimately, it will support AWS, Azure, Google Cloud Platform,
-// and IBM Cloud; currently, it supports only AWS.  The data gathered is either
+// and IBM Cloud; currently, it supports only AWS directly.  However, via
+// Cloudability, it pulls Amazon, Azure, and GCP.  The data gathered is either
 // saved to a local file as CSV or it is loaded into a Google Sheet.
 //
 // The configuration for this tool is provided by a YAML file.  The file
@@ -12,7 +13,7 @@
 //
 // Providing Credentials
 //
-//  - AWS access is controlled in the conventional ways:  either via
+//  - Direct AWS access is controlled in the conventional ways:  either via
 //    environment variables AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY or via
 //    ~/.aws/ config files created by the `awscli configure` command.  If using
 //    the file-based credentials, you may select a specific profile.
@@ -54,24 +55,14 @@
 //    with the `-month` command line option, as "-month 2024-08", but it
 //    defaults to the month previous to the current one.
 //
-//    The tool creates the target sheet for the raw data by copying an existing
-//    template sheet in the spreadsheet whose name is configured with the key,
-//    "templateSheetName".  The first row of this sheet is reserved for column
-//    headers, and so the data is written starting at the second row.  The last
-//    column of the sheet is reserved for row totals, and so the data rows must
-//    fit in the preceding columns.  Also, in order for the tool to correctly
-//    determine the "totals" column, the template sheet must not include any
-//    columns after the "totals" column (any extra columns should be explicitly
-//    deleted).
-//
-//    Finally, the tool expects that the spreadsheet contains a "main sheet"
-//    which references the raw data sheets.  This sheet must be specified in
-//    the using YAML file using the key, "mainSheetName".  Unfortunately,
-//    Google Sheets seems to have a mal-feature which results in situations
-//    where references between sheets are not updated reliably.  For instance,
-//    creating a new sheet or, in many cases, even just updating it, will not
-//    refresh a reference to it in another sheet.  The accepted workaround for
-//    this is to copy and paste the cell references over themselves.  To effect
+//    The tool expects that the spreadsheet contains a "main sheet" which
+//    references the raw data sheets.  This sheet must be specified in the YAML
+//    file using the key, "mainSheetName".  Unfortunately, Google Sheets seems
+//    to have a mal-feature which results in situations where references
+//    between sheets are not updated reliably.  For instance, creating a new
+//    sheet or, in many cases, even just updating it, will not refresh a
+//    reference to it in another sheet.  The accepted workaround for this is
+//    to copy and paste the cell references over themselves.  To effect
 //    this, the tool expects that there is a cell in the main sheet which
 //    contains the name of the raw data sheet and which is used for indirect
 //    lookups in the raw data sheet, moreover that the formulas containing the
