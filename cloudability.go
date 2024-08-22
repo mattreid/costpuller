@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"fmt"
@@ -146,16 +147,24 @@ func getCloudabilityData(configMap Configuration, options CommandLineOptions) *C
 		RawQuery: qParams.Encode(),
 	}
 
+	client := http.Client{Timeout: time.Second * 180}
+
 	request, err := http.NewRequest("GET", cUrl.String(), http.NoBody)
 	if err != nil {
 		log.Fatalf("Error creating Cloudability request:  %v", err)
 	}
-	apiKey := getMapKeyString(configMap, "api_key", "cloudability")
-	request.SetBasicAuth(apiKey, "")
+
+	if _, ok := configMap["api_key"]; ok {
+		apiKey := getMapKeyString(configMap, "api_key", "cloudability")
+		request.SetBasicAuth(apiKey, "")
+	} else {
+		request.Header.Add("apptio-opentoken", getApptioOpentoken(configMap, client))
+		environmentId := getMapKeyString(configMap, "environmentId", "cloudability")
+		request.Header.Add("apptio-environmentid", environmentId)
+	}
 	request.Header.Add("Accept", "application/json")
 
-	log.Println("[getCloudabilityData] Sending request")
-	client := http.Client{Timeout: time.Second * 180}
+	log.Println("[getCloudabilityData] Sending request for data")
 	response, err := client.Do(request)
 	if err != nil {
 		log.Fatalf("Error sending request to Cloudability:  %v", err)
@@ -185,6 +194,56 @@ func getCloudabilityData(configMap Configuration, options CommandLineOptions) *C
 	}
 
 	return responseData
+}
+
+func getApptioOpentoken(configMap Configuration, client http.Client) string {
+	apiKeyPairAny := getMapKeyValue(configMap, "api_key_pair", "cloudability")
+	apiKeyPair, ok := apiKeyPairAny.([]any)
+	if !ok {
+		log.Fatalf(
+			"Error reading Cloudability API keypair, expected an array, found %T",
+			apiKeyPairAny,
+		)
+	}
+	if len(apiKeyPair) != 2 {
+		log.Fatalf(
+			"Error reading Cloudability API keypair, expected 2 items, found %d",
+			len(apiKeyPair),
+		)
+	}
+	apiAccessKey, ok1 := apiKeyPair[0].(string)
+	apiSecret, ok2 := apiKeyPair[1].(string)
+	if !ok1 || !ok2 {
+		log.Fatalf(
+			"Error reading Cloudability API keypair, expected entries to be strings, found %T and %T",
+			apiKeyPair[0], apiKeyPair[1])
+	}
+	body := bytes.NewBufferString(`{"keyAccess":"` + apiAccessKey + `","keySecret":"` + apiSecret + `"}`)
+	authRequest, err := http.NewRequest("POST", "https://frontdoor.apptio.com/service/apikeylogin", body)
+	if err != nil {
+		log.Fatalf("Error creating Cloudability authorization request:  %v", err)
+	}
+	authRequest.Header.Add("Accept", "application/json")
+	authRequest.Header.Add("content-type", "application/json")
+
+	log.Println("[getCloudabilityData] Sending request for authorization")
+	authResponse, err := client.Do(authRequest)
+	if err != nil {
+		log.Fatalf("Error sending authorization request to Cloudability:  %v", err)
+	}
+	if authResponse.StatusCode != http.StatusOK {
+		log.Fatalf(
+			"Error getting authorization data from Cloudability:  %d, %q",
+			authResponse.StatusCode,
+			authResponse.Status,
+		)
+	}
+	defer func(Body io.ReadCloser) {
+		if err := Body.Close(); err != nil {
+			log.Fatalf("Ignoring error closing Cloudability body: %v", err)
+		}
+	}(authResponse.Body)
+	return authResponse.Header.Get("apptio-opentoken")
 }
 
 type cldyAccountMetadata struct {
