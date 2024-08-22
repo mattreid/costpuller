@@ -382,26 +382,15 @@ func getSheetFromCloudability(
 	}
 	output = append(output, &sheets.RowData{Values: sheetRow})
 
-	// Fill in the sheet with one row for each account:  the first column
-	// contains a formula which totals the cost columns; the next several
-	// columns are filled from metadata; and the rest of each row is filled
-	// using values from the sparse grid with zeros for any missing data.
+	// Fill in the sheet with one row for each account, iterating over the
+	// column headers and inserting the appropriate values into each cell.
 	for accountId, dataRow := range costCells {
 		sheetRow = make([]*sheets.CellData, len(columnHeadsList))
 		for idx, key := range columnHeadsList {
 			var val *sheets.CellData
 			switch {
 			case key == "TOTAL":
-				val = newFormulaCell(getTotalsFormula(len(output), fixed, len(columnHeadsList)))
-				val.UserEnteredFormat = &sheets.CellFormat{
-					BackgroundColorStyle: &sheets.ColorStyle{
-						RgbColor: &sheets.Color{
-							Blue:  239.0 / 256.0,
-							Green: 239.0 / 256.0,
-							Red:   239.0 / 256.0,
-						},
-					},
-				}
+				val = nil // Will be set after sorting
 			case key == "Team":
 				val = newStringCell(accountsMetadata[accountId].Group)
 			case key == "Date":
@@ -434,6 +423,22 @@ func getSheetFromCloudability(
 	sortOutput(output[1:], slices.Index(columnHeadsList, "Cloud Provider"))
 	sortOutput(output[1:], slices.Index(columnHeadsList, "Team"))
 
+	// Now that we have the grid sorted, set the "TOTAL" formulas, each of
+	// which has to be relative to its own row (so, sorting screws them up).
+	tc := slices.Index(columnHeadsList, "TOTAL")
+	for idx, row := range output[1:] {
+		row.Values[tc] = newFormulaCell(getTotalsFormula(idx+1, fixed, len(columnHeadsList)-1))
+		row.Values[tc].UserEnteredFormat = &sheets.CellFormat{
+			BackgroundColorStyle: &sheets.ColorStyle{
+				RgbColor: &sheets.Color{
+					Blue:  239.0 / 256.0,
+					Green: 239.0 / 256.0,
+					Red:   239.0 / 256.0,
+				},
+			},
+		}
+	}
+
 	return
 }
 
@@ -450,15 +455,15 @@ func sortOutput(output []*sheets.RowData, columnIndex int) {
 
 // getTotalsFormula is a helper function which constructs a formula for
 // calculating the sum of a consecutive range of values a row of a sheet.
-// The arguments are the row and column of the first value and the number
-// of values in the row.  The reference is converted to A1:B1 form and
-// changed from zero-based to one-based.
-func getTotalsFormula(row int, col int, count int) string {
+// The arguments are the index of the row to sum, the column of the first
+// value, and the column of the last value -- the indices are zero-based.
+// The references are converted to A1:B1 form.
+func getTotalsFormula(row int, startCol int, endCol int) string {
 	return fmt.Sprintf(
 		"=SUM(%s%d:%s%d)",
-		colNumToRef(col),
+		colNumToRef(startCol),
 		row+1,
-		colNumToRef(col+count-1),
+		colNumToRef(endCol),
 		row+1,
 	)
 }
