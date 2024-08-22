@@ -190,7 +190,7 @@ func main() {
 			log.Fatalf("[main] no Cloudability data")
 		}
 
-		sheetData = getSheetFromCloudability(cldyCostData, accountMetadata)
+		sheetData = getSheetFromCloudability(cldyCostData, accountMetadata, cldy)
 	}
 
 	output.writeSheet(sheetData)

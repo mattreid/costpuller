@@ -257,6 +257,7 @@ type cldyAccountMetadata struct {
 func getSheetFromCloudability(
 	cldy *CloudabilityCostData,
 	accountsMetadata map[string]*AccountMetadata,
+	configMap Configuration,
 ) (output []*sheets.RowData) {
 	// Build a two-dimensional map in which the first key is the account ID,
 	// the second key is the usage family, and the value is the corresponding
@@ -286,10 +287,14 @@ func getSheetFromCloudability(
 			accountsMetadata[entry.AccountID].DataFound = true
 		} else {
 			if _, exists := ignored[entry.AccountID]; !exists {
-				log.Printf(
-					"Info:  found account which is not in the accounts file:  Cloudability:%s:%s:%s (%s); ignoring",
-					entry.CostCenter, entry.CloudProvider, entry.AccountID, entry.AccountName,
-				)
+				ourCostCenter := getMapKeyString(configMap, "cost_center", "")
+				if entry.CostCenter == ourCostCenter {
+					log.Printf(
+						"Warning:  found account which is not in the accounts file:  "+
+							"Cloudability:%s:%s:%s (%s); ignoring",
+						entry.CostCenter, entry.CloudProvider, entry.AccountID, entry.AccountName,
+					)
+				}
 				ignored[entry.AccountID] = struct{}{}
 			}
 			continue
@@ -355,7 +360,7 @@ func getSheetFromCloudability(
 	// it must appear before any values (such as the totals) which will be
 	// looked up.
 	columnHeadsList := []string{"Team", "Date", "Cloud Provider", "Payer ID",
-		"Account Name", "Account ID", "TOTAL"}
+		"Cost Center", "Account Name", "Account ID", "TOTAL"}
 	fixed := len(columnHeadsList)
 	columnHeadsList = append(columnHeadsList, sortedKeys(columnHeadsSet)...)
 
@@ -403,6 +408,8 @@ func getSheetFromCloudability(
 				val = newStringCell(cldy.Meta.Dates.Start.Format("2006-01"))
 			case key == "Cloud Provider":
 				val = newStringCell(accountsMetadata[accountId].CloudProvider)
+			case key == "Cost Center":
+				val = newStringCell(metadata[accountId].CostCenter)
 			case key == "Payer ID":
 				val = newStringCell(metadata[accountId].PayerAccountId)
 			case key == "Account ID": // Use the ID from the YAML file, not from Cloudability
