@@ -90,10 +90,25 @@ func getCloudabilityData(configMap Configuration, options CommandLineOptions) *C
 		log.Fatalf("Error in Cloudability \"api_host\" value (%q): %v", configMap["api"], err)
 	}
 
-	var startTime, endTime string
+	now := time.Now()
+	var startString, endString string
 	if inTime, err := time.Parse("2006-01", *options.monthPtr); err == nil {
-		startTime = inTime.Format("2006-01-02")
-		endTime = inTime.AddDate(0, 1, -1).Format("2006-01-02")
+		if inTime.After(now) {
+			log.Fatalf(
+				"Error:  specified month, %q, is in the future.",
+				*options.monthPtr,
+			)
+		}
+		startString = inTime.Format("2006-01-02")
+		endTime := inTime.AddDate(0, 1, -1)
+		if endTime.After(now) {
+			log.Printf(
+				"Warning:  specified month, %q, extends into the future.",
+				*options.monthPtr,
+			)
+			endTime = now
+		}
+		endString = endTime.Format("2006-01-02")
 	} else {
 		log.Fatalf("Error in Cloudability \"month\" value (%q): %v", *options.monthPtr, err)
 	}
@@ -104,8 +119,8 @@ func getCloudabilityData(configMap Configuration, options CommandLineOptions) *C
 	}
 
 	qParams := cUrl.Query()
-	qParams.Set("start_date", startTime)
-	qParams.Set("end_date", endTime)
+	qParams.Set("start_date", startString)
+	qParams.Set("end_date", endString)
 	qParams.Set("dimensions", "vendor,category4,account_identifier,vendor_account_name,vendor_account_identifier,usage_family")
 	qParams.Set("metrics", costType)
 	filtersAny := getMapKeyValue(configMap, "filters", "")
