@@ -195,6 +195,15 @@ func main() {
 		}
 		getSheetDataFromCloudability(cldyCostData, accountMetadata, cldy, costCells, columnHeadsSet, metadata)
 
+		ibmc, fetchIbmcloudData := accountsFile.Configuration["ibmcloud"]
+		if fetchIbmcloudData {
+			ibmCostData := getIbmcloudData(ibmc, options)
+			if ibmCostData == nil || len(ibmCostData) == 0 {
+				log.Fatal("[main] no IBM Cloud data")
+			}
+			getSheetDataFromIbmcloud(ibmCostData, accountMetadata, ibmc, costCells, metadata)
+		}
+
 		checkMissing(accountMetadata, cldyCostData)
 
 		sheetData = getSheetFromCostCells(costCells, columnHeadsSet, accountMetadata, metadata)
