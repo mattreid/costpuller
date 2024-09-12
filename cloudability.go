@@ -277,34 +277,19 @@ func getSheetFromCloudability(
 	metadata := make(map[string]cldyAccountMetadata)
 	ignored := make(map[string]struct{}) // Suppress multiple warnings
 	for _, entry := range cldy.Results {
-		// Keep track of which accounts we find, and warn about finding ones
-		// which we're not looking for.
-		if _, exists := accountsMetadata[entry.AccountID]; exists {
-			if accountsMetadata[entry.AccountID].CloudProvider != entry.CloudProvider &&
-				// Allow "AWS" as an alias for "Amazon"
-				!(entry.CloudProvider == "Amazon" && accountsMetadata[entry.AccountID].CloudProvider == "AWS") {
-				log.Printf(
-					"For account %s, the accounts file has cloud provider %q, but it should be %q; using %q",
-					entry.AccountID,
-					accountsMetadata[entry.AccountID].CloudProvider,
-					entry.CloudProvider,
-					entry.CloudProvider,
-				)
-				accountsMetadata[entry.AccountID].CloudProvider = entry.CloudProvider
-			}
-			accountsMetadata[entry.AccountID].DataFound = true
-		} else {
-			if _, exists := ignored[entry.AccountID]; !exists {
-				ourCostCenter := getMapKeyString(configMap, "cost_center", "")
-				if entry.CostCenter == ourCostCenter {
-					log.Printf(
-						"Warning:  found account which is not in the accounts file:  "+
-							"Cloudability:%s:%s:%s (%s); ignoring",
-						entry.CostCenter, entry.CloudProvider, entry.AccountID, entry.AccountName,
-					)
-				}
-				ignored[entry.AccountID] = struct{}{}
-			}
+		// Skip accounts that we're not looking for, but keep a list of them so
+		// that we don't issue multiple warnings for them; warn about accounts
+		// attributed to our cost center that we're not currently tracking.
+		if skipAccountEntry(
+			accountsMetadata[entry.AccountID],
+			entry.AccountID,
+			&entry.CostCenter,
+			entry.CloudProvider,
+			&entry.AccountName,
+			ignored,
+			configMap,
+			"Cloudability",
+		) {
 			continue
 		}
 

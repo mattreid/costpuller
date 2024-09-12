@@ -190,6 +190,8 @@ func main() {
 			log.Fatalf("[main] no Cloudability data")
 		}
 
+		checkMissing(accountMetadata, cldyCostData)
+
 		sheetData = getSheetFromCloudability(cldyCostData, accountMetadata, cldy)
 	}
 
@@ -578,4 +580,76 @@ func getStringFromAny(anyValue any, message string) (value string) {
 		log.Fatalf("Unexpected value (%v) for %s, expected a string", anyValue, message)
 	}
 	return
+}
+
+// skipAccountEntry is a helper function which determines whether to skip
+// account entries that we're not looking for.  It updates a list of them so
+// that we don't issue multiple warnings for them; it warns about account
+// entries attributed to our cost center that we're not currently tracking.
+func skipAccountEntry(
+	accountMetadata *AccountMetadata,
+	accountId string,
+	costCenter *string,
+	cloudProvider string,
+	accountName *string,
+	ignored map[string]struct{},
+	configMap Configuration,
+	configName string,
+) bool {
+	if accountMetadata == nil {
+		if _, exists := ignored[accountId]; !exists {
+			ourCostCenter := getMapKeyString(configMap, "cost_center", "")
+			if costCenter != nil && *costCenter == ourCostCenter {
+				log.Printf("Warning:  found account which is not in the accounts file:  "+
+					"%s:%s:%s:%s (%s); ignoring",
+					configName, StrDeref(costCenter), cloudProvider, accountId, StrDeref(accountName))
+			}
+			ignored[accountId] = struct{}{}
+		}
+		return true
+	}
+	// Note the cloud provider which corresponds to the account ID, and
+	// warn about errors in the accounts file.
+	if accountMetadata.CloudProvider != cloudProvider &&
+		// Accept "AWS" as an alias for "Amazon"
+		!(cloudProvider == "Amazon" && accountMetadata.CloudProvider == "AWS") {
+		log.Printf(
+			"For account %s, the accounts file has cloud provider %q, but it should be %q; using %q",
+			accountId,
+			accountMetadata.CloudProvider,
+			cloudProvider,
+			cloudProvider,
+		)
+		accountMetadata.CloudProvider = cloudProvider
+	}
+	// Mark this account as "found" so that we can report ones which aren't.
+	accountMetadata.DataFound = true
+	return false
+}
+
+// StrDeref is a helper function which dereferences and returns the string
+// pointed to by a string pointer; if the pointer is nil, returns "<nil>".
+func StrDeref(s *string) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return *s
+}
+
+func checkMissing(accountsMetadata map[string]*AccountMetadata, cldy *CloudabilityCostData) {
+	// Check for accounts from the YAML file which were not found in the
+	// Cloudability data.
+	var filters []string
+	for id, entry := range accountsMetadata {
+		if !entry.DataFound {
+			if filters == nil {
+				for _, filter := range cldy.Meta.Filters {
+					filters = append(filters, fmt.Sprintf("%q %s %q", filter.Label, filter.Comparator, filter.Value))
+				}
+			}
+			log.Printf(
+				"Warning:  no data source found for account %s:%s:%s; filters: %s",
+				entry.CloudProvider, entry.Group, id, strings.Join(filters, " && "))
+		}
+	}
 }
