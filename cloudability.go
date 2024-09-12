@@ -2,17 +2,12 @@ package main
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/json"
-	"fmt"
-	"google.golang.org/api/sheets/v4"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -254,27 +249,19 @@ func getApptioOpentoken(configMap Configuration, client http.Client) string {
 	return authResponse.Header.Get("apptio-opentoken")
 }
 
-type cldyAccountMetadata struct {
-	AccountName    string
-	CloudProvider  string
-	CostCenter     string
-	PayerAccountId string
-}
-
-// getSheetFromCloudability converts the cost data into a Google Sheet.
-func getSheetFromCloudability(
+func getSheetDataFromCloudability(
 	cldy *CloudabilityCostData,
 	accountsMetadata map[string]*AccountMetadata,
 	configMap Configuration,
-) (output []*sheets.RowData) {
+	costCells map[string]map[string]float64,
+	columnHeadsSet map[string]struct{},
+	metadata map[string]providerAccountMetadata,
+) {
 	// Build a two-dimensional map in which the first key is the account ID,
 	// the second key is the usage family, and the value is the corresponding
 	// cost -- this amounts to a sparse sheet grid.  While we're at it, collect
 	// the column headers for the grid (using a map "trick" where we only care
 	// about the keys), and collect some metadata for each account.
-	costCells := make(map[string]map[string]float64)
-	columnHeadsSet := make(map[string]struct{}) // This is the Go equivalent of a "set".
-	metadata := make(map[string]cldyAccountMetadata)
 	ignored := make(map[string]struct{}) // Suppress multiple warnings
 	for _, entry := range cldy.Results {
 		// Skip accounts that we're not looking for, but keep a list of them so
@@ -298,10 +285,11 @@ func getSheetFromCloudability(
 		// account, note its account-specific metadata.
 		columnHeadsSet[entry.UsageFamily] = struct{}{}
 		if _, exists := metadata[entry.AccountID]; !exists {
-			metadata[entry.AccountID] = cldyAccountMetadata{
+			metadata[entry.AccountID] = providerAccountMetadata{
 				AccountName:    entry.AccountName,
 				CloudProvider:  entry.CloudProvider,
 				CostCenter:     entry.CostCenter,
+				Date:           cldy.Meta.Dates.Start.Format("2006-01"),
 				PayerAccountId: entry.PayerAccountId,
 			}
 		}
@@ -327,141 +315,4 @@ func getSheetFromCloudability(
 		}
 		costCells[entry.AccountID][entry.UsageFamily] = cost
 	}
-
-	// Check for accounts from the YAML file which were not found in the
-	// Cloudability data.
-	for id, entry := range accountsMetadata {
-		if !entry.DataFound {
-			var filters []string
-			for _, filter := range cldy.Meta.Filters {
-				filters = append(filters, fmt.Sprintf("%q %s %q", filter.Label, filter.Comparator, filter.Value))
-			}
-			log.Printf("Warning:  account not found Cloudability:%s:%s:%s; filters: %s",
-				entry.CloudProvider, entry.Group, id, strings.Join(filters, " && "))
-		}
-	}
-
-	// Build a list of column headers, starting with a fixed set of strings for
-	// metadata and ending with the headers collected from the data.
-	//
-	// Note:  The "Account ID" column will be used as the key for lookups, so
-	// it must appear before any values (such as the totals) which will be
-	// looked up.
-	columnHeadsList := []string{"Team", "Date", "Cloud Provider", "Payer ID",
-		"Cost Center", "Account Name", "Account ID", "TOTAL"}
-	fixed := len(columnHeadsList)
-	columnHeadsList = append(columnHeadsList, sortedKeys(columnHeadsSet)...)
-
-	// Add the headers to the sheet data as the first row.
-	sheetRow := make([]*sheets.CellData, len(columnHeadsList))
-	for idx, header := range columnHeadsList {
-		sheetRow[idx] = newStringCell(header)
-		sheetRow[idx].UserEnteredFormat = &sheets.CellFormat{
-			BackgroundColorStyle: &sheets.ColorStyle{
-				RgbColor: &sheets.Color{
-					Blue:  204.0 / 256.0,
-					Green: 204.0 / 256.0,
-					Red:   204.0 / 256.0,
-				},
-			},
-			HorizontalAlignment: "CENTER",
-			TextFormat:          &sheets.TextFormat{Bold: true},
-		}
-	}
-	output = append(output, &sheets.RowData{Values: sheetRow})
-
-	// Fill in the sheet with one row for each account, iterating over the
-	// column headers and inserting the appropriate values into each cell.
-	for accountId, dataRow := range costCells {
-		sheetRow = make([]*sheets.CellData, len(columnHeadsList))
-		for idx, key := range columnHeadsList {
-			var val *sheets.CellData
-			switch {
-			case key == "TOTAL":
-				val = nil // Will be set after sorting
-			case key == "Team":
-				val = newStringCell(accountsMetadata[accountId].Group)
-			case key == "Date":
-				val = newStringCell(cldy.Meta.Dates.Start.Format("2006-01"))
-			case key == "Cloud Provider":
-				val = newStringCell(accountsMetadata[accountId].CloudProvider)
-			case key == "Cost Center":
-				val = newStringCell(metadata[accountId].CostCenter)
-			case key == "Payer ID":
-				val = newStringCell(metadata[accountId].PayerAccountId)
-			case key == "Account ID": // Use the ID from the YAML file, not from Cloudability
-				val = newStringCell(accountsMetadata[accountId].AccountId)
-			case key == "Account Name":
-				val = newStringCell(metadata[accountId].AccountName)
-			default:
-				val = newNumberCell(dataRow[key])
-				val.UserEnteredFormat = &sheets.CellFormat{
-					NumberFormat: &sheets.NumberFormat{
-						//Pattern: "",
-						Type: "CURRENCY",
-					},
-				}
-			}
-			sheetRow[idx] = val
-		}
-		output = append(output, &sheets.RowData{Values: sheetRow})
-	}
-
-	sortOutput(output[1:], slices.Index(columnHeadsList, "Account ID"))
-	sortOutput(output[1:], slices.Index(columnHeadsList, "Cloud Provider"))
-	sortOutput(output[1:], slices.Index(columnHeadsList, "Team"))
-
-	// Now that we have the grid sorted, set the "TOTAL" formulas, each of
-	// which has to be relative to its own row (so, sorting screws them up).
-	tc := slices.Index(columnHeadsList, "TOTAL")
-	for idx, row := range output[1:] {
-		row.Values[tc] = newFormulaCell(getTotalsFormula(idx+1, fixed, len(columnHeadsList)-1))
-		row.Values[tc].UserEnteredFormat = &sheets.CellFormat{
-			BackgroundColorStyle: &sheets.ColorStyle{
-				RgbColor: &sheets.Color{
-					Blue:  239.0 / 256.0,
-					Green: 239.0 / 256.0,
-					Red:   239.0 / 256.0,
-				},
-			},
-		}
-	}
-
-	return
-}
-
-// sortOutput sorts the rows of the provided sheet according to the indicated
-// column.  Uses a stable sort so that we can retain the ordering from previous
-// sorts for entries with equal values in the current sort.
-func sortOutput(output []*sheets.RowData, columnIndex int) {
-	slices.SortStableFunc(output, func(a, b *sheets.RowData) int {
-		return cmp.Compare(
-			*a.Values[columnIndex].UserEnteredValue.StringValue,
-			*b.Values[columnIndex].UserEnteredValue.StringValue)
-	})
-}
-
-// getTotalsFormula is a helper function which constructs a formula for
-// calculating the sum of a consecutive range of values a row of a sheet.
-// The arguments are the index of the row to sum, the column of the first
-// value, and the column of the last value -- the indices are zero-based.
-// The references are converted to A1:B1 form.
-func getTotalsFormula(row int, startCol int, endCol int) string {
-	return fmt.Sprintf(
-		"=SUM(%s%d:%s%d)",
-		colNumToRef(startCol),
-		row+1,
-		colNumToRef(endCol),
-		row+1,
-	)
-}
-
-// colNumToRef converts a zero-based column ordinal to a letter-reference
-// (e.g., 0 yields "A"; 25 yields "Z"; 26 yields "AA"; 676 yields "AAA").
-func colNumToRef(n int) (s string) {
-	d, r := n/26, n%26
-	if d > 0 {
-		s = colNumToRef(d - 1)
-	}
-	return s + fmt.Sprintf("%c", 'A'+r)
 }

@@ -185,14 +185,19 @@ func main() {
 
 		sheetData = awsPuller.pullAwsByAccount(awsAccounts, sortedAccountKeys, options, reportFile)
 	} else {
+		costCells := make(map[string]map[string]float64)
+		columnHeadsSet := make(map[string]struct{}) // This is the Go equivalent of a "set".
+		metadata := make(map[string]providerAccountMetadata)
+
 		cldyCostData := getCloudabilityData(cldy, options)
 		if cldyCostData == nil || cldyCostData.TotalResults == 0 || len(cldyCostData.Results) == 0 {
 			log.Fatalf("[main] no Cloudability data")
 		}
+		getSheetDataFromCloudability(cldyCostData, accountMetadata, cldy, costCells, columnHeadsSet, metadata)
 
 		checkMissing(accountMetadata, cldyCostData)
 
-		sheetData = getSheetFromCloudability(cldyCostData, accountMetadata, cldy)
+		sheetData = getSheetFromCostCells(costCells, columnHeadsSet, accountMetadata, metadata)
 	}
 
 	output.writeSheet(sheetData)

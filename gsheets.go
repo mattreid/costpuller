@@ -1,15 +1,25 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
+
+type providerAccountMetadata struct {
+	AccountName    string
+	CloudProvider  string
+	CostCenter     string
+	Date           string
+	PayerAccountId string
+}
 
 // postToGSheet creates a new sheet in a Google Sheets spreadsheet and loads it
 // with the specified data.  Requests are made to the Google API using the
@@ -255,4 +265,136 @@ func newFormulaCell(formula string) *sheets.CellData {
 			FormulaValue: &formula,
 		},
 	}
+}
+
+// getSheetFromCostCells converts the cost data into a Google Sheet.
+func getSheetFromCostCells(
+	costCells map[string]map[string]float64,
+	columnHeadsSet map[string]struct{},
+	accountsMetadata map[string]*AccountMetadata,
+	metadata map[string]providerAccountMetadata,
+) (output []*sheets.RowData) {
+	// Build a list of column headers, starting with a fixed set of strings for
+	// metadata and ending with the headers collected from the data.
+	//
+	// Note:  The "Account ID" column will be used as the key for lookups, so
+	// it must appear before any values (such as the totals) which will be
+	// looked up.
+	columnHeadsList := []string{"Team", "Date", "Cloud Provider", "Payer ID",
+		"Cost Center", "Account Name", "Account ID", "TOTAL"}
+	fixed := len(columnHeadsList)
+	columnHeadsList = append(columnHeadsList, sortedKeys(columnHeadsSet)...)
+
+	// Add the headers to the sheet data as the first row.
+	sheetRow := make([]*sheets.CellData, len(columnHeadsList))
+	for idx, header := range columnHeadsList {
+		sheetRow[idx] = newStringCell(header)
+		sheetRow[idx].UserEnteredFormat = &sheets.CellFormat{
+			BackgroundColorStyle: &sheets.ColorStyle{
+				RgbColor: &sheets.Color{
+					Blue:  204.0 / 256.0,
+					Green: 204.0 / 256.0,
+					Red:   204.0 / 256.0,
+				},
+			},
+			HorizontalAlignment: "CENTER",
+			TextFormat:          &sheets.TextFormat{Bold: true},
+		}
+	}
+	output = append(output, &sheets.RowData{Values: sheetRow})
+
+	// Fill in the sheet with one row for each account, iterating over the
+	// column headers and inserting the appropriate values into each cell.
+	for accountId, dataRow := range costCells {
+		sheetRow = make([]*sheets.CellData, len(columnHeadsList))
+		for idx, key := range columnHeadsList {
+			var val *sheets.CellData
+			switch {
+			case key == "TOTAL":
+				val = nil // Will be set after sorting
+			case key == "Team":
+				val = newStringCell(accountsMetadata[accountId].Group)
+			case key == "Date":
+				val = newStringCell(metadata[accountId].Date)
+			case key == "Cloud Provider":
+				val = newStringCell(accountsMetadata[accountId].CloudProvider)
+			case key == "Cost Center":
+				val = newStringCell(metadata[accountId].CostCenter)
+			case key == "Payer ID":
+				val = newStringCell(metadata[accountId].PayerAccountId)
+			case key == "Account ID": // Use the ID from the YAML file, not from Cloudability
+				val = newStringCell(accountsMetadata[accountId].AccountId)
+			case key == "Account Name":
+				val = newStringCell(metadata[accountId].AccountName)
+			default:
+				val = newNumberCell(dataRow[key])
+				val.UserEnteredFormat = &sheets.CellFormat{
+					NumberFormat: &sheets.NumberFormat{
+						//Pattern: "",
+						Type: "CURRENCY",
+					},
+				}
+			}
+			sheetRow[idx] = val
+		}
+		output = append(output, &sheets.RowData{Values: sheetRow})
+	}
+
+	sortOutput(output[1:], slices.Index(columnHeadsList, "Account ID"))
+	sortOutput(output[1:], slices.Index(columnHeadsList, "Cloud Provider"))
+	sortOutput(output[1:], slices.Index(columnHeadsList, "Team"))
+
+	// Now that we have the grid sorted, set the "TOTAL" formulas, each of
+	// which has to be relative to its own row (so, sorting screws them up).
+	tc := slices.Index(columnHeadsList, "TOTAL")
+	for idx, row := range output[1:] {
+		row.Values[tc] = newFormulaCell(getTotalsFormula(idx+1, fixed, len(columnHeadsList)-1))
+		row.Values[tc].UserEnteredFormat = &sheets.CellFormat{
+			BackgroundColorStyle: &sheets.ColorStyle{
+				RgbColor: &sheets.Color{
+					Blue:  239.0 / 256.0,
+					Green: 239.0 / 256.0,
+					Red:   239.0 / 256.0,
+				},
+			},
+		}
+	}
+
+	return
+}
+
+// sortOutput sorts the rows of the provided sheet according to the indicated
+// column.  Uses a stable sort so that we can retain the ordering from previous
+// sorts for entries with equal values in the current sort.
+func sortOutput(output []*sheets.RowData, columnIndex int) {
+	slices.SortStableFunc(output, func(a, b *sheets.RowData) int {
+		return cmp.Compare(
+			*a.Values[columnIndex].UserEnteredValue.StringValue,
+			*b.Values[columnIndex].UserEnteredValue.StringValue)
+	})
+}
+
+// getTotalsFormula is a helper function which constructs a formula for
+// calculating the sum of a consecutive range of values a row of a sheet.
+// The arguments are the index of the row to sum, the column of the first
+// value, and the column of the last value -- the indices are zero-based.
+// The references are converted to A1:B1 form.
+func getTotalsFormula(row int, startCol int, endCol int) string {
+	return fmt.Sprintf(
+		"=SUM(%s%d:%s%d)",
+		colNumToRef(startCol),
+		row+1,
+		colNumToRef(endCol),
+		row+1,
+	)
+}
+
+// colNumToRef converts a zero-based column ordinal to a letter-reference
+// (e.g., 0 yields "A"; 25 yields "Z"; 26 yields "AA"; 676 yields "AAA").
+func colNumToRef(n int) (s string) {
+	d, r := n/26, n%26
+	if d > 0 {
+		s = colNumToRef(d - 1)
+	}
+	return s + fmt.Sprintf("%c", 'A'+r)
 }
