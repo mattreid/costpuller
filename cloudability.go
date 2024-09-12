@@ -215,16 +215,12 @@ func getApptioOpentoken(configMap Configuration, client http.Client) string {
 	apiKeyPairAny := getMapKeyValue(configMap, "api_key_pair", "cloudability")
 	apiKeyPair, ok := apiKeyPairAny.([]any)
 	if !ok {
-		log.Fatalf(
-			"Error reading Cloudability API keypair, expected an array, found %T",
-			apiKeyPairAny,
-		)
+		log.Fatalf("Error reading Cloudability API keypair, expected an array, found %T",
+			apiKeyPairAny)
 	}
 	if len(apiKeyPair) != 2 {
-		log.Fatalf(
-			"Error reading Cloudability API keypair, expected 2 items, found %d",
-			len(apiKeyPair),
-		)
+		log.Fatalf("Error reading Cloudability API keypair, expected 2 items, found %d",
+			len(apiKeyPair))
 	}
 	apiAccessKey, ok1 := apiKeyPair[0].(string)
 	apiSecret, ok2 := apiKeyPair[1].(string)
@@ -247,11 +243,8 @@ func getApptioOpentoken(configMap Configuration, client http.Client) string {
 		log.Fatalf("Error sending authorization request to Cloudability:  %v", err)
 	}
 	if authResponse.StatusCode != http.StatusOK {
-		log.Fatalf(
-			"Error getting authorization data from Cloudability:  %d, %q",
-			authResponse.StatusCode,
-			authResponse.Status,
-		)
+		log.Fatalf("Error getting authorization data from Cloudability:  %d, %q",
+			authResponse.StatusCode, authResponse.Status)
 	}
 	defer func(Body io.ReadCloser) {
 		if err := Body.Close(); err != nil {
@@ -333,13 +326,8 @@ func getSheetFromCloudability(
 		// an error.
 		cost, err := strconv.ParseFloat(entry.Cost, 64)
 		if err != nil {
-			log.Fatalf(
-				"Error parsing %s:%s Cost value (%s) as a float: %v",
-				entry.AccountID,
-				entry.UsageFamily,
-				entry.Cost,
-				err,
-			)
+			log.Fatalf("Error parsing %s:%s Cost value (%v) as a float: %v",
+				entry.AccountID, entry.UsageFamily, entry.Cost, err)
 		}
 		if _, exists := costCells[entry.AccountID]; !exists {
 			costCells[entry.AccountID] = make(map[string]float64)

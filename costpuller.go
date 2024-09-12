@@ -122,7 +122,7 @@ type AccountEntry struct {
 }
 
 func main() {
-	log.Println("[main] costpuller starting..")
+	log.Println("[main] costpuller starting.")
 	nowTime := time.Now()
 	lastMonth := time.Date(nowTime.Year(), nowTime.Month()-1, 1, 0, 0, 0, 0, nowTime.Location())
 	nowStr := nowTime.Format("20060102150405")
@@ -228,10 +228,13 @@ func newOutputObject(options CommandLineOptions, accountsFile AccountsFile) *Out
 }
 
 func (o *OutputObject) writeSheet(sheetData []*sheets.RowData) {
+	if sheetData == nil || len(sheetData) == 0 {
+		log.Fatal("[writeSheet] no sheet data")
+	}
 	if o.csvFile != nil {
 		err := writeCsvFromSheet(o.csvFile, sheetData)
 		if err != nil {
-			log.Fatalf("[main] error writing to output file: %v", err)
+			log.Fatalf("[writeSheet] error writing to output file: %v", err)
 		}
 	}
 	if o.httpClient != nil {
