@@ -1,15 +1,17 @@
 // Theory of Operation
 //
-// This tool gathers billing data from various accounts on various cloud
-// providers.  Ultimately, it will support AWS, Azure, Google Cloud Platform,
-// and IBM Cloud; currently, it supports only AWS directly.  However, via
-// Cloudability, it pulls Amazon, Azure, and GCP.  The data gathered is either
-// saved to a local file as CSV or it is loaded into a Google Sheet.
+// This tool gathers billing data for various accounts on various cloud
+// providers.  Currently, it supports only AWS directly; alternatively, it
+// supports Amazon, Azure, and Google Cloud Platform via Cloudability.  Since
+// support for IBM Cloud is not yet available via Cloudability, it uses direct
+// access to IBM Cloud to augment the data when configured to use Cloudability.
+// The data gathered is either saved to a local file as CSV or it is loaded
+// into a Google Sheet.
 //
 // The configuration for this tool is provided by a YAML file.  The file
-// provides the list of cloud providers and the account IDs for each one,
-// grouped by organization.  It also provides a section for configuring and
-// customizing the operation of this tool.
+// provides the list of account IDs whose spending data is to be retrieved,
+// grouped by cloud provider and business organization.  It also provides a
+// section for configuring and customizing the operation of this tool.
 //
 // Providing Credentials
 //
@@ -29,14 +31,22 @@
 //    listener provided by this tool, which allows the tool to obtain the
 //    OAuth access code.  The tool then exchanges that for the tokens, which it
 //    writes to the cache file.
+//  - Access to IBM Cloud is provided via an API key.  A key may be obtained
+//    from the IBM Cloud web page after logging in under the "Manage" menu item
+//    "Access (IAM)" by selecting "API Keys" from the sidebar and clicking on
+//    the "Create +" button on the right at the top of the table.  The API Key
+//    must be placed in the Accounts YAML file as the value of the key,
+//    "api_key", in the "ibmcloud" subsection of the "configuration" section.
+//    The account ID is available from the IAM Dashboard from the sidebar on
+//    the management page.
 //
 // The Output
 //
 //    This tool collects the billing data from the cloud provider for each
 //    account in the YAML file.  The data is post-processed with certain values
-//    being coalesced into category values.  The result is a single row with
-//    canonical columns.  The data can be output to a CSV file, or it can be
-//    loaded into a Google Spreadsheet.
+//    being coalesced into category values.  The result is a single row for
+//    each account with canonical columns.  The data can be output to a CSV
+//    file, or it can be loaded into a Google Spreadsheet.
 //
 // The Google Sheets Spreadsheet Configuration & Magic
 //

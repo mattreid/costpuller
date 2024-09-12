@@ -69,7 +69,8 @@ func postToGSheet(sheetData []*sheets.RowData, client *http.Client, configMap Co
 	if err != nil {
 		log.Fatalf("Error fetching main sheet (%q) values: %v", mainSheetID, err)
 	}
-	mainSheetRef := getNewSheetReference(cells, mainSheetID, newSheetName, len(sheetData))
+	// Increase the length by one to cover the "Total" row
+	mainSheetRef := getNewSheetReference(cells, mainSheetID, newSheetName, len(sheetData)+1)
 	if mainSheetRef == nil {
 		log.Fatalf("No reference to %q found in main sheet (%q)", newSheetName, mainSheetName)
 	}
