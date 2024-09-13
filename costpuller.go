@@ -671,9 +671,12 @@ func checkMissing(accountsMetadata map[string]*AccountMetadata, cldy *Cloudabili
 					filters = append(filters, fmt.Sprintf("%q %s %q", filter.Label, filter.Comparator, filter.Value))
 				}
 			}
-			log.Printf(
-				"Warning:  no data source found for account %s:%s:%s; filters: %s",
-				entry.CloudProvider, entry.Group, id, strings.Join(filters, " && "))
+			msg := fmt.Sprintf("Warning:  no data source found for account %s:%s:%s",
+				entry.CloudProvider, entry.Group, id)
+			if entry.CloudProvider != "IBMCloud" {
+				msg += fmt.Sprintf("; filters: %s", strings.Join(filters, " && "))
+			}
+			log.Printf(msg)
 		}
 	}
 }
