@@ -32,7 +32,6 @@ func getIbmcloudData(configMap Configuration, options CommandLineOptions) []Ibmc
 		//URL:           getMapKeyString(configMap, "endpoint", ConfigSect),  // The default works.
 		Authenticator: authenticator,
 	}
-
 	eurServiceClient, err := enterpriseusagereportsv1.NewEnterpriseUsageReportsV1(&eurOpts)
 	if err != nil {
 		log.Fatalf("Error creating IBM Cloud enterprise usage reports client: %v", err)
@@ -42,35 +41,8 @@ func getIbmcloudData(configMap Configuration, options CommandLineOptions) []Ibmc
 		SetAccountGroupID(accountIdStr).
 		SetMonth(*options.monthPtr)
 
-	grurOpts.SetChildren(false) // Get the account group itself
-	log.Println("[getIbmcloudData] getting account group")
-	result, response, err := eurServiceClient.GetResourceUsageReport(grurOpts)
-	if err != nil {
-		log.Fatalf("Error getting IBM Cloud account group: %v", err)
-	}
-	if response.StatusCode != 200 {
-		log.Fatalf(
-			"HTTP error %d getting IBM Cloud account group: %v",
-			response.StatusCode,
-			response,
-		)
-	}
-
-	costCenter := *result.Reports[0].EntityName
-
-	grurOpts.SetChildren(true) // Get the accounts in the group
-	log.Println("[getIbmcloudData] getting account summaries")
-	result, response, err = eurServiceClient.GetResourceUsageReport(grurOpts)
-	if err != nil {
-		log.Fatalf("Error getting IBM Cloud enterprise summaries: %v", err)
-	}
-	if response.StatusCode != 200 {
-		log.Fatalf(
-			"HTTP error %d getting IBM Cloud enterprise summaries: %v",
-			response.StatusCode,
-			response,
-		)
-	}
+	costCenter := getAccountGroupName(grurOpts, eurServiceClient)
+	result := getUsageReport(grurOpts, eurServiceClient)
 
 	urOpts := usagereportsv4.UsageReportsV4Options{Authenticator: authenticator} // Use the default URL
 	urServiceClient, err := usagereportsv4.NewUsageReportsV4(&urOpts)
@@ -78,7 +50,15 @@ func getIbmcloudData(configMap Configuration, options CommandLineOptions) []Ibmc
 		log.Fatalf("Error creating IBM Cloud Usage Reports client: %v", err)
 	}
 
-	var returnValue []IbmcResultsEntry
+	return getAccountResults(result, costCenter, *options.monthPtr, urServiceClient)
+}
+
+func getAccountResults(
+	result *enterpriseusagereportsv1.Reports,
+	costCenter string,
+	month string,
+	urServiceClient *usagereportsv4.UsageReportsV4,
+) (returnValue []IbmcResultsEntry) {
 	for _, account := range result.Reports {
 		resultEntry := IbmcResultsEntry{
 			ResultsEntry: ResultsEntry{
@@ -92,7 +72,7 @@ func getIbmcloudData(configMap Configuration, options CommandLineOptions) []Ibmc
 		}
 
 		log.Printf("[getIbmcloudData] getting account summary for %s", *account.EntityID)
-		summaryOpts := urServiceClient.NewGetAccountSummaryOptions(*account.EntityID, *options.monthPtr)
+		summaryOpts := urServiceClient.NewGetAccountSummaryOptions(*account.EntityID, month)
 		as, response, err := urServiceClient.GetAccountSummary(summaryOpts)
 		if err != nil {
 			log.Fatalf("Error getting IBM Cloud account summary: %v", err)
@@ -107,8 +87,41 @@ func getIbmcloudData(configMap Configuration, options CommandLineOptions) []Ibmc
 		resultEntry.Data = as
 		returnValue = append(returnValue, resultEntry)
 	}
+	return
+}
 
-	return returnValue
+func getAccountGroupName(
+	serviceOpts *enterpriseusagereportsv1.GetResourceUsageReportOptions,
+	serviceClient *enterpriseusagereportsv1.EnterpriseUsageReportsV1,
+) string {
+	serviceOpts.SetChildren(false) // Get the account group itself
+	result := serviceCall(serviceOpts, serviceClient, "account group")
+	return *result.Reports[0].EntityName
+}
+
+func getUsageReport(
+	serviceOptions *enterpriseusagereportsv1.GetResourceUsageReportOptions,
+	serviceClient *enterpriseusagereportsv1.EnterpriseUsageReportsV1,
+) *enterpriseusagereportsv1.Reports {
+	serviceOptions.SetChildren(true) // Get the accounts in the group
+	return serviceCall(serviceOptions, serviceClient, "enterprise summaries")
+}
+
+func serviceCall(
+	serviceOptions *enterpriseusagereportsv1.GetResourceUsageReportOptions,
+	serviceClient *enterpriseusagereportsv1.EnterpriseUsageReportsV1,
+	logId string,
+) *enterpriseusagereportsv1.Reports {
+	log.Printf("[getIbmcloudData] getting %s", logId)
+	result, response, err := serviceClient.GetResourceUsageReport(serviceOptions)
+	if err != nil {
+		log.Fatalf("Error getting IBM Cloud %s: %v", logId, err)
+	}
+	if response.StatusCode != 200 {
+		log.Fatalf("HTTP error %d getting IBM Cloud %s: %v",
+			response.StatusCode, logId, response)
+	}
+	return result
 }
 
 // getSheetDataFromIbmcloud converts the cost data into a Google Sheet.
