@@ -37,8 +37,11 @@
 //    the "Create +" button on the right at the top of the table.  The API Key
 //    must be placed in the Accounts YAML file as the value of the key,
 //    "api_key", in the "ibmcloud" subsection of the "configuration" section.
-//    The account ID is available from the IAM Dashboard from the sidebar on
-//    the management page.
+//    The account ID should be set to the ID for the appropriate "Account
+//    Group".  The account group IDs are available from the "Accounts" tab in
+//    page reached from the "Enterprise" option under the "Manage" menu.  The
+//    API key must have view-access to the account group itself or to the
+//    enterprise as whole.
 //
 // The Output
 //
@@ -613,20 +616,20 @@ func getStringFromAny(anyValue any, message string) (value string) {
 func skipAccountEntry(
 	accountMetadata *AccountMetadata,
 	accountId string,
-	costCenter *string,
-	cloudProvider string,
-	accountName *string,
+	costCenter string,
+	providerConfigName string,
+	accountName string,
 	ignored map[string]struct{},
 	configMap Configuration,
-	configName string,
+	dataSource string,
 ) bool {
 	if accountMetadata == nil {
 		if _, exists := ignored[accountId]; !exists {
 			ourCostCenter := getMapKeyString(configMap, "cost_center", "")
-			if costCenter != nil && *costCenter == ourCostCenter {
+			if costCenter == ourCostCenter {
 				log.Printf("Warning:  found account which is not in the accounts file:  "+
 					"%s:%s:%s:%s (%s); ignoring",
-					configName, StrDeref(costCenter), cloudProvider, accountId, StrDeref(accountName))
+					dataSource, costCenter, providerConfigName, accountId, accountName)
 			}
 			ignored[accountId] = struct{}{}
 		}
@@ -634,30 +637,21 @@ func skipAccountEntry(
 	}
 	// Note the cloud provider which corresponds to the account ID, and
 	// warn about errors in the accounts file.
-	if accountMetadata.CloudProvider != cloudProvider &&
+	if accountMetadata.CloudProvider != providerConfigName &&
 		// Accept "AWS" as an alias for "Amazon"
-		!(cloudProvider == "Amazon" && accountMetadata.CloudProvider == "AWS") {
+		!(providerConfigName == "Amazon" && accountMetadata.CloudProvider == "AWS") {
 		log.Printf(
 			"For account %s, the accounts file has cloud provider %q, but it should be %q; using %q",
 			accountId,
 			accountMetadata.CloudProvider,
-			cloudProvider,
-			cloudProvider,
+			providerConfigName,
+			providerConfigName,
 		)
-		accountMetadata.CloudProvider = cloudProvider
+		accountMetadata.CloudProvider = providerConfigName
 	}
 	// Mark this account as "found" so that we can report ones which aren't.
 	accountMetadata.DataFound = true
 	return false
-}
-
-// StrDeref is a helper function which dereferences and returns the string
-// pointed to by a string pointer; if the pointer is nil, returns "<nil>".
-func StrDeref(s *string) string {
-	if s == nil {
-		return "<nil>"
-	}
-	return *s
 }
 
 func checkMissing(accountsMetadata map[string]*AccountMetadata, cldy *CloudabilityCostData) {

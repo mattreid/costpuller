@@ -3,24 +3,33 @@ package main
 import (
 	"github.com/IBM/platform-services-go-sdk/usagereportsv4"
 	"log"
+	"strconv"
 
 	"github.com/IBM/go-sdk-core/v5/core"
 	"github.com/IBM/platform-services-go-sdk/enterpriseusagereportsv1"
 )
 
-func getIbmcloudData(configMap Configuration, options CommandLineOptions) []*usagereportsv4.AccountSummary {
-	accountIdStr := getMapKeyString(configMap, "account_id", "ibmcloud")
+const ConfigSect = "ibmcloud"    // Key in the 'configuration' section of the accounts YAML file
+const CloudProvider = "IBMCloud" // Key in the 'cloud_providers' section of the accounts YAML file
+
+type IbmcResultsEntry struct {
+	ResultsEntry
+	Data *usagereportsv4.AccountSummary
+}
+
+func getIbmcloudData(configMap Configuration, options CommandLineOptions) []IbmcResultsEntry {
+	accountIdStr := getMapKeyString(configMap, "account_id", ConfigSect)
 
 	log.Println("[getIbmcloudData] creating session")
 	authenticator, err := core.NewIamAuthenticatorBuilder().
-		SetApiKey(getMapKeyString(configMap, "api_key", "ibmcloud")).
+		SetApiKey(getMapKeyString(configMap, "api_key", ConfigSect)).
 		Build()
 	if err != nil {
 		log.Fatalf("Error creating IBM Cloud authenticator: %v", err)
 	}
 
 	eurOpts := enterpriseusagereportsv1.EnterpriseUsageReportsV1Options{
-		//URL:           getMapKeyString(configMap, "endpoint", "ibmcloud"),  // The default works.
+		//URL:           getMapKeyString(configMap, "endpoint", ConfigSect),  // The default works.
 		Authenticator: authenticator,
 	}
 
@@ -31,11 +40,27 @@ func getIbmcloudData(configMap Configuration, options CommandLineOptions) []*usa
 
 	grurOpts := eurServiceClient.NewGetResourceUsageReportOptions().
 		SetAccountGroupID(accountIdStr).
-		SetChildren(true).
 		SetMonth(*options.monthPtr)
 
-	log.Println("[getIbmcloudData] getting account summaries")
+	grurOpts.SetChildren(false) // Get the account group itself
+	log.Println("[getIbmcloudData] getting account group")
 	result, response, err := eurServiceClient.GetResourceUsageReport(grurOpts)
+	if err != nil {
+		log.Fatalf("Error getting IBM Cloud account group: %v", err)
+	}
+	if response.StatusCode != 200 {
+		log.Fatalf(
+			"HTTP error %d getting IBM Cloud account group: %v",
+			response.StatusCode,
+			response,
+		)
+	}
+
+	costCenter := *result.Reports[0].EntityName
+
+	grurOpts.SetChildren(true) // Get the accounts in the group
+	log.Println("[getIbmcloudData] getting account summaries")
+	result, response, err = eurServiceClient.GetResourceUsageReport(grurOpts)
 	if err != nil {
 		log.Fatalf("Error getting IBM Cloud enterprise summaries: %v", err)
 	}
@@ -47,17 +72,28 @@ func getIbmcloudData(configMap Configuration, options CommandLineOptions) []*usa
 		)
 	}
 
-	var accounts []*usagereportsv4.AccountSummary
 	urOpts := usagereportsv4.UsageReportsV4Options{Authenticator: authenticator} // Use the default URL
 	urServiceClient, err := usagereportsv4.NewUsageReportsV4(&urOpts)
 	if err != nil {
 		log.Fatalf("Error creating IBM Cloud Usage Reports client: %v", err)
 	}
 
+	var returnValue []IbmcResultsEntry
 	for _, account := range result.Reports {
+		resultEntry := IbmcResultsEntry{
+			ResultsEntry: ResultsEntry{
+				AccountID:      *account.EntityID,
+				AccountName:    *account.EntityName,
+				CloudProvider:  CloudProvider,
+				Cost:           strconv.FormatFloat(*account.BillableCost, 'f', 2, 64),
+				CostCenter:     costCenter,
+				PayerAccountId: *account.BillingUnitID,
+			},
+		}
+
 		log.Printf("[getIbmcloudData] getting account summary for %s", *account.EntityID)
 		summaryOpts := urServiceClient.NewGetAccountSummaryOptions(*account.EntityID, *options.monthPtr)
-		accountSummary, response, err := urServiceClient.GetAccountSummary(summaryOpts)
+		as, response, err := urServiceClient.GetAccountSummary(summaryOpts)
 		if err != nil {
 			log.Fatalf("Error getting IBM Cloud account summary: %v", err)
 		}
@@ -68,15 +104,16 @@ func getIbmcloudData(configMap Configuration, options CommandLineOptions) []*usa
 				response,
 			)
 		}
-		accounts = append(accounts, accountSummary)
+		resultEntry.Data = as
+		returnValue = append(returnValue, resultEntry)
 	}
 
-	return accounts
+	return returnValue
 }
 
 // getSheetDataFromIbmcloud converts the cost data into a Google Sheet.
 func getSheetDataFromIbmcloud(
-	accounts []*usagereportsv4.AccountSummary,
+	accounts []IbmcResultsEntry,
 	accountsMetadata map[string]*AccountMetadata,
 	configMap Configuration,
 	costCells map[string]map[string]float64,
@@ -88,18 +125,17 @@ func getSheetDataFromIbmcloud(
 	// the column headers for the grid (using a map "trick" where we only care
 	// about the keys), and collect some metadata for each account.
 	ignored := make(map[string]struct{}) // Suppress multiple warnings
-	const CloudProvider = "IBMCloud"
 	for _, accountSummary := range accounts {
 		// Skip accounts that we're not looking for, but keep a list of them so
 		// that we don't issue multiple warnings for them; warn about accounts
 		// attributed to our cost center that we're not currently tracking.
-		accountId := *accountSummary.AccountID
+		accountId := accountSummary.AccountID
 		if skipAccountEntry(
 			accountsMetadata[accountId],
 			accountId,
-			nil,
-			CloudProvider,
-			nil,
+			accountSummary.CostCenter,
+			accountSummary.CloudProvider,
+			accountSummary.AccountName,
 			ignored,
 			configMap,
 			"IBM Cloud",
@@ -117,14 +153,14 @@ func getSheetDataFromIbmcloud(
 		}
 		// Note this account's account-specific metadata.
 		metadata[accountId] = providerAccountMetadata{
-			AccountName:    accountId, // FIXME:  This should be enterpriseusagereportsv1.Reports.Reports[].EntityName
-			CloudProvider:  "ibm",
-			CostCenter:     "726", // FIXME:  This needs to correspond to the configuration.ibmcloud.account_id value
-			Date:           *accountSummary.Month,
-			PayerAccountId: "8b3a7b0393f14aea99b7c58de46724f8", // FIXME:  This comes from enterpriseusagereportsv1.Reports.Reports[].BillingUnitID
+			AccountName:    accountSummary.AccountName,
+			CloudProvider:  accountSummary.CloudProvider,
+			CostCenter:     accountSummary.CostCenter,
+			Date:           *accountSummary.Data.Month,
+			PayerAccountId: accountSummary.PayerAccountId,
 		}
 
-		for _, resource := range accountSummary.AccountResources {
+		for _, resource := range accountSummary.Data.AccountResources {
 			// Place costs according to their resource ID into the Cloudability
 			// "Usage Family" buckets.
 			//

@@ -270,9 +270,9 @@ func getSheetDataFromCloudability(
 		if skipAccountEntry(
 			accountsMetadata[entry.AccountID],
 			entry.AccountID,
-			&entry.CostCenter,
+			entry.CostCenter,
 			entry.CloudProvider,
-			&entry.AccountName,
+			entry.AccountName,
 			ignored,
 			configMap,
 			"Cloudability",
