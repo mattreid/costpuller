@@ -1,15 +1,15 @@
 package main
 
 import (
+	"github.com/IBM/platform-services-go-sdk/usagereportsv4"
 	"log"
 
 	"github.com/IBM/go-sdk-core/v5/core"
-	"github.com/IBM/platform-services-go-sdk/usagereportsv4"
+	"github.com/IBM/platform-services-go-sdk/enterpriseusagereportsv1"
 )
 
-func getIbmcloudData(configMap Configuration, options CommandLineOptions) []usagereportsv4.AccountSummary {
+func getIbmcloudData(configMap Configuration, options CommandLineOptions) []*usagereportsv4.AccountSummary {
 	accountIdStr := getMapKeyString(configMap, "account_id", "ibmcloud")
-	var accounts []usagereportsv4.AccountSummary
 
 	log.Println("[getIbmcloudData] creating session")
 	authenticator, err := core.NewIamAuthenticatorBuilder().
@@ -18,36 +18,65 @@ func getIbmcloudData(configMap Configuration, options CommandLineOptions) []usag
 	if err != nil {
 		log.Fatalf("Error creating IBM Cloud authenticator: %v", err)
 	}
-	urOpts := usagereportsv4.UsageReportsV4Options{
-		URL:           getMapKeyString(configMap, "endpoint", "ibmcloud"),
+
+	eurOpts := enterpriseusagereportsv1.EnterpriseUsageReportsV1Options{
+		//URL:           getMapKeyString(configMap, "endpoint", "ibmcloud"),  // The default works.
 		Authenticator: authenticator,
 	}
-	serviceClient, err := usagereportsv4.NewUsageReportsV4(&urOpts)
+
+	eurServiceClient, err := enterpriseusagereportsv1.NewEnterpriseUsageReportsV1(&eurOpts)
 	if err != nil {
-		log.Fatalf("Error creating IBM Cloud Usage Reports client: %v", err)
+		log.Fatalf("Error creating IBM Cloud enterprise usage reports client: %v", err)
 	}
 
-	log.Println("[getIbmcloudData] getting account summary")
-	summaryOpts := serviceClient.NewGetAccountSummaryOptions(accountIdStr, *options.monthPtr)
-	accountSummary, response, err := serviceClient.GetAccountSummary(summaryOpts)
+	grurOpts := eurServiceClient.NewGetResourceUsageReportOptions().
+		SetAccountGroupID(accountIdStr).
+		SetChildren(true).
+		SetMonth(*options.monthPtr)
+
+	log.Println("[getIbmcloudData] getting account summaries")
+	result, response, err := eurServiceClient.GetResourceUsageReport(grurOpts)
 	if err != nil {
-		log.Fatalf("Error getting IBM Cloud account summary: %v", err)
+		log.Fatalf("Error getting IBM Cloud enterprise summaries: %v", err)
 	}
 	if response.StatusCode != 200 {
 		log.Fatalf(
-			"HTTP error %d getting IBM Cloud account summary: %v",
+			"HTTP error %d getting IBM Cloud enterprise summaries: %v",
 			response.StatusCode,
 			response,
 		)
 	}
-	accounts = append(accounts, *accountSummary)
+
+	var accounts []*usagereportsv4.AccountSummary
+	urOpts := usagereportsv4.UsageReportsV4Options{Authenticator: authenticator} // Use the default URL
+	urServiceClient, err := usagereportsv4.NewUsageReportsV4(&urOpts)
+	if err != nil {
+		log.Fatalf("Error creating IBM Cloud Usage Reports client: %v", err)
+	}
+
+	for _, account := range result.Reports {
+		log.Printf("[getIbmcloudData] getting account summary for %s", *account.EntityID)
+		summaryOpts := urServiceClient.NewGetAccountSummaryOptions(*account.EntityID, *options.monthPtr)
+		accountSummary, response, err := urServiceClient.GetAccountSummary(summaryOpts)
+		if err != nil {
+			log.Fatalf("Error getting IBM Cloud account summary: %v", err)
+		}
+		if response.StatusCode != 200 {
+			log.Fatalf(
+				"HTTP error %d getting IBM Cloud account summary: %v",
+				response.StatusCode,
+				response,
+			)
+		}
+		accounts = append(accounts, accountSummary)
+	}
 
 	return accounts
 }
 
 // getSheetDataFromIbmcloud converts the cost data into a Google Sheet.
 func getSheetDataFromIbmcloud(
-	accounts []usagereportsv4.AccountSummary,
+	accounts []*usagereportsv4.AccountSummary,
 	accountsMetadata map[string]*AccountMetadata,
 	configMap Configuration,
 	costCells map[string]map[string]float64,
@@ -88,36 +117,38 @@ func getSheetDataFromIbmcloud(
 		}
 		// Note this account's account-specific metadata.
 		metadata[accountId] = providerAccountMetadata{
-			AccountName:    accountId, // We don't seem to have a "name"
+			AccountName:    accountId, // FIXME:  This should be enterpriseusagereportsv1.Reports.Reports[].EntityName
 			CloudProvider:  "ibm",
-			CostCenter:     "", // FIXME?
+			CostCenter:     "726", // FIXME:  This needs to correspond to the configuration.ibmcloud.account_id value
 			Date:           *accountSummary.Month,
-			PayerAccountId: "", // FIXME?
+			PayerAccountId: "8b3a7b0393f14aea99b7c58de46724f8", // FIXME:  This comes from enterpriseusagereportsv1.Reports.Reports[].BillingUnitID
 		}
 
 		for _, resource := range accountSummary.AccountResources {
 			// Place costs according to their resource ID into the Cloudability
 			// "Usage Family" buckets.
+			//
+			// Note:  in several cases, the bucketing is arbitrary and probably
+			//        incorrect....
 			bucket := "Other"
 			switch *resource.ResourceName {
-			case "Kubernetes Service":
-				bucket = "Instance Usage"
-			case "Block Storage for VPC": // FIXME:  How is this different from "Cloud Object Storage"?
+			case "Block Storage for VPC",
+				"Cloud Object Storage":
 				bucket = "Storage"
-			case "Load Balancer for VPC":
-				bucket = "Load Balancer"
+			case "Cloud Activity Tracker", "Cloud Monitoring":
+				bucket = "Notifications"
+			case "Continuous Delivery", "Log Analysis":
+				bucket = "Other"
 			case "Floating IP for VPC":
 				bucket = "IP Address"
+			case "Kubernetes Service":
+				bucket = "Instance Usage"
+			case "Load Balancer for VPC":
+				bucket = "Load Balancer"
 			case "Virtual Private Cloud":
-				bucket = "VPN" // FIXME:  This is tagged "Virtual Private Cloud / Standard Gen2"
-			case "Cloud Object Storage": // FIXME:  How is this different from "Block Storage for VPC"?
-				bucket = "Storage"
-			case "Cloud Activity Tracker":
-				bucket = "Notifications"
-			case "Virtual Private Endpoint for VPC":
+				bucket = "VPN"
+			case "Virtual Private Endpoint for VPC", "Virtual Server for VPC":
 				bucket = "VPC Endpoint"
-			case "Continuous Delivery":
-				bucket = "Other" // FIXME:  This is tagged "Continuous Delivery / Lite"
 			default:
 				log.Printf(
 					"[getSheetDataFromIbmcloud] unexpected resource %q (%s); using category %q",
@@ -161,7 +192,7 @@ func getSheetDataFromIbmcloud(
 			//		// This was attempt #1
 			//
 			//		case "AUTHORIZED_USERS_PER_MONTH":
-			//			bucket = "Other" // FIXME
+			//			bucket = "Other"
 			//		case "DISK_HOURS":
 			//			bucket = "Storage"
 			//		case "GIGABYTE_HOURS":
