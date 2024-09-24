@@ -667,7 +667,7 @@ func checkMissing(accountsMetadata map[string]*AccountMetadata, cldy *Cloudabili
 			}
 			msg := fmt.Sprintf("Warning:  no data source found for account %s:%s:%s",
 				entry.CloudProvider, entry.Group, id)
-			if entry.CloudProvider != "IBMCloud" {
+			if entry.CloudProvider != "IBM" { // FIXME:  This is broken if the data did come from Cloudability.
 				msg += fmt.Sprintf("; filters: %s", strings.Join(filters, " && "))
 			}
 			log.Printf(msg)

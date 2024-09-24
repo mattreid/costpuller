@@ -9,8 +9,8 @@ import (
 	"github.com/IBM/platform-services-go-sdk/enterpriseusagereportsv1"
 )
 
-const ConfigSect = "ibmcloud"    // Key in the 'configuration' section of the accounts YAML file
-const CloudProvider = "IBMCloud" // Key in the 'cloud_providers' section of the accounts YAML file
+const ConfigSect = "ibmcloud" // Key in the 'configuration' section of the accounts YAML file
+const CloudProvider = "IBM"   // Key in the 'cloud_providers' section of the accounts YAML file
 
 type IbmcResultsEntry struct {
 	ResultsEntry
