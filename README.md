@@ -31,7 +31,9 @@ Run the binary with the `-help` option to list the command line options.
    other from the file.
  - Google Sheets access is provided via OAuth 2.0.  This tool acts as an
    OAuth client.  The client configuration is provided in the conventional
-   location (e.g., `${HOME}/.config/gcloud/application_default_credentials.json`)
+   location (e.g., `${HOME}/.config/gcloud/application_default_credentials.json`
+   or pointed to by the `GOOGLE_APPLICATION_CREDENTIALS` environment variable;
+   see the Google [ADC documentation](https://cloud.google.com/docs/authentication/set-up-adc-local-dev-environment))
    and can be downloaded from a project on https://console.developers.google.com,
    under "Credentials".  The access token and refresh token are cached in a
    local file.  If the token file doesn't exist, this tool prompts the user to
